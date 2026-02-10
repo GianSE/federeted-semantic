@@ -1,0 +1,30 @@
+# --- Python (Arquivos compilados) ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Ambientes Virtuais e Variáveis ---
+venv/
+env/
+.env
+
+# --- Arquivos de Sistema (Lixo do Windows/Mac) ---
+.DS_Store
+Thumbs.db
+
+# --- Logs do Projeto ---
+src/logs/
+*.log
+
+# --- Banco de Dados e Estado ---
+*.db
+*.db-journal
+src/metrics.db
+
+# --- Arquivos Gerados em Tempo de Execução (Runtime) ---
+src/global_model.pth
+src/status.json
+src/dataset.txt
+
+# --- Docker (Opcional, caso gere arquivos locais) ---
+.docker/
