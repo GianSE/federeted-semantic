@@ -7,7 +7,7 @@ import torch.optim as optim
 import copy
 import numpy as np
 from datetime import datetime
-from text_utils import detokenize_text # <--- Nova função
+from text_utils import detokenize_text
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -28,44 +28,50 @@ def calculate_weight_diff(model_before, model_after):
 def train_and_upload(model, data, targets, server_url, node_id, text=""):
     try:
         model_before = copy.deepcopy(model)
-        optimizer = optim.SGD(model.parameters(), lr=0.05) # Aumentei LR para aprender rápido
-        criterion = nn.MSELoss()
+        
+        # Otimizador Adam é melhor para LSTMs complexas
+        optimizer = optim.Adam(model.parameters(), lr=0.005)
+        
+        # Loss para classificação de texto (prevê qual letra é a próxima)
+        criterion = nn.CrossEntropyLoss(ignore_index=0) 
         model.train()
 
-        # --- TESTE ANTES DO TREINO (O que ela enxerga?) ---
+        # --- TESTE INICIAL ---
         with torch.no_grad():
-            output_tensor = model(data)
-            reconstructed_text = detokenize_text(output_tensor)
+            logits = model(data)
+            reconstructed = detokenize_text(logits)
         
-        # Log Visual da Correção
-        log_terminal(f"👁️ Entrada: '{text}'", node_id)
-        log_terminal(f"🗣️ IA Diz:   '{reconstructed_text}'", node_id)
+        log_terminal(f"👁️ Lê: '{text}'", node_id)
+        log_terminal(f"🗣️ Diz: '{reconstructed}'", node_id)
         
-        # --- TREINAMENTO ---
-        log_terminal(f"🔄 Ajustando cérebro...", node_id)
-        epochs = 5
+        # --- TREINO ---
+        log_terminal(f"🔥 Treinando Deep LSTM...", node_id)
+        epochs = 10 # Modelos grandes aprendem rápido com poucos dados repetidos
         final_loss = 0
         
         for epoch in range(epochs):
             optimizer.zero_grad()
-            output = model(data)
-            loss = criterion(output, targets) # Compara Saída com Entrada
+            output_logits = model(data) # [1, 30, 128]
+            
+            # Ajusta formatos para CrossEntropy: (Batch*Seq, Vocab) vs (Batch*Seq)
+            loss = criterion(output_logits.view(-1, 128), targets.view(-1))
+            
             loss.backward()
             optimizer.step()
             final_loss = loss.item()
 
         weight_change = calculate_weight_diff(model_before, model)
-        log_terminal(f"🧠 Loss: {final_loss:.6f} (Aprendendo...)", node_id)
+        log_terminal(f"🧠 Loss: {final_loss:.4f}", node_id)
 
-        # --- ENVIO ---
+        # --- ENVIO (Compressão) ---
         full_weights = model.state_dict()
         final_payload = {}
 
         if "full" not in node_id:
-            # Compressão (Dropout Semântico)
-            log_terminal("⚠️ [GenIA] Comprimindo conhecimentos...", node_id)
+            log_terminal("⚠️ [GenIA] Comprimindo Matrizes (Dropout)...", node_id)
             for key, value in full_weights.items():
                 arr = value.cpu().numpy()
+                # Em matrizes gigantes, comprimir 50% é muita economia!
                 mask = np.random.choice([True, False], size=arr.shape, p=[0.5, 0.5])
                 final_payload[key] = np.where(mask, arr, None).tolist()
         else:
@@ -79,7 +85,7 @@ def train_and_upload(model, data, targets, server_url, node_id, text=""):
             })
             log_terminal("✅ Enviado.\n", node_id)
         except:
-            log_terminal("❌ Falha no envio.\n", node_id)
+            log_terminal("❌ Falha envio.\n", node_id)
 
     except Exception as e:
         log_terminal(f"❌ Erro: {e}", node_id)

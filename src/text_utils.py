@@ -1,30 +1,38 @@
 import torch
 
-def tokenize_text(text, size=10):
-    """Converte Texto -> Tensor (Normalizado 0 a 1)"""
-    # Pega os primeiros 'size' caracteres
-    vals = [ord(c) for c in text[:size]]
-    # Preenche com zeros (padding) se for menor
+# Tamanho padrão fixo para facilitar LSTMs
+MAX_LEN = 30 
+VOCAB_SIZE = 128 # ASCII padrão
+
+def tokenize_text(text, size=MAX_LEN):
+    """Converte Texto -> Tensor de Índices Inteiros (LongTensor)"""
+    # Garante tamanho máximo
+    text = text[:size]
+    
+    # Converte chars para índices ASCII
+    vals = [ord(c) if ord(c) < VOCAB_SIZE else 32 for c in text] # 32 = Espaço se for char estranho
+    
+    # Padding (preenche com 0)
     while len(vals) < size:
         vals.append(0)
     
-    # Normaliza (ASCII vai de 0 a 255)
-    tensor = torch.tensor(vals, dtype=torch.float32).unsqueeze(0) / 255.0
-    return tensor
+    # Retorna LongTensor (Inteiros) para Embedding
+    return torch.tensor(vals, dtype=torch.long).unsqueeze(0)
 
-def detokenize_text(tensor):
-    """A MÁGICA: Converte Tensor -> Texto Legível"""
-    # Desfaz a normalização (* 255)
-    vals = (tensor.squeeze() * 255.0).int().tolist()
-    
-    # Reconstrói a string, ignorando zeros e sujeira negativa
+def detokenize_text(logits):
+    """Converte Logits (Probabilidades) -> Texto"""
+    # Pega o índice com maior probabilidade (Argmax)
+    if logits.dim() == 3:
+        indices = torch.argmax(logits, dim=2).squeeze().tolist()
+    else:
+        indices = logits.tolist()
+
+    if isinstance(indices, int): indices = [indices]
+        
     chars = []
-    for v in vals:
-        if v > 31 and v < 127: # Apenas caracteres imprimíveis ASCII
-            chars.append(chr(v))
+    for idx in indices:
+        # 0 é padding, ignoramos. 
+        if idx > 0 and idx < VOCAB_SIZE:
+            chars.append(chr(idx))
             
     return "".join(chars)
-
-# Mantido para compatibilidade se algo antigo chamar
-def text_to_tensor(text):
-    return tokenize_text(text)
