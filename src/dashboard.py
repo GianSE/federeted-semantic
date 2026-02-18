@@ -12,68 +12,66 @@ import numpy as np
 st.sidebar.divider()
 st.sidebar.subheader("🔥 Controle de Caos (Network)")
 
-# Checkbox para ligar/desligar
 chaos_active = st.sidebar.toggle("Ativar Instabilidade", value=True)
 
-# --- LÓGICA DE SINCRONIZAÇÃO (Callback) ---
+# Inicializa Session State para todos os 4 parâmetros
 if 'loss_val' not in st.session_state: st.session_state.loss_val = 0.05
-if 'delay_val' not in st.session_state: st.session_state.delay_val = 300
+if 'delay_val' not in st.session_state: st.session_state.delay_val = 500
+if 'corrupt_val' not in st.session_state: st.session_state.corrupt_val = 0.00
+if 'dup_val' not in st.session_state: st.session_state.dup_val = 0.00 # NOVO
 
+# Callbacks de Sincronização
 def update_loss_slider(): st.session_state.loss_val = st.session_state.loss_slider
 def update_loss_input(): st.session_state.loss_val = st.session_state.loss_input
 def update_delay_slider(): st.session_state.delay_val = st.session_state.delay_slider
 def update_delay_input(): st.session_state.delay_val = st.session_state.delay_input
+def update_corrupt_slider(): st.session_state.corrupt_val = st.session_state.corrupt_slider
+def update_corrupt_input(): st.session_state.corrupt_val = st.session_state.corrupt_input
+def update_dup_slider(): st.session_state.dup_val = st.session_state.dup_slider # NOVO
+def update_dup_input(): st.session_state.dup_val = st.session_state.dup_input   # NOVO
 
-# --- 1. PERDA DE PACOTES (LOSS) ---
+# 1. PERDA (LOSS)
 st.sidebar.write("Perda de Pacotes (%)")
-col1, col2 = st.sidebar.columns([3, 1]) # Coluna larga (Slider) e estreita (Input)
+c1, c2 = st.sidebar.columns([3, 1])
+with c1: st.slider("", 0.0, 5.0, key='loss_slider', value=st.session_state.loss_val, on_change=update_loss_slider, format="%.2f")
+with c2: st.number_input("", 0.0, 5.0, key='loss_input', value=st.session_state.loss_val, on_change=update_loss_input, label_visibility="collapsed")
 
-with col1:
-    st.slider(
-        "", min_value=0.00, max_value=5.00, step=0.01,
-        key='loss_slider', value=st.session_state.loss_val, 
-        on_change=update_loss_slider, format="%.2f"
-    )
-
-with col2:
-    st.number_input(
-        "", min_value=0.00, max_value=5.00, step=0.01,
-        key='loss_input', value=st.session_state.loss_val, 
-        on_change=update_loss_input, label_visibility="collapsed"
-    )
-
-# --- 2. LATÊNCIA (DELAY) ---
+# 2. LATÊNCIA (DELAY)
 st.sidebar.write("Latência (ms)")
-col3, col4 = st.sidebar.columns([3, 1])
+c3, c4 = st.sidebar.columns([3, 1])
+with c3: st.slider("", 0, 2000, key='delay_slider', value=st.session_state.delay_val, on_change=update_delay_slider)
+with c4: st.number_input("", 0, 2000, key='delay_input', value=st.session_state.delay_val, on_change=update_delay_input, label_visibility="collapsed")
 
-with col3:
-    st.slider(
-        "", min_value=0, max_value=2000, step=50,
-        key='delay_slider', value=st.session_state.delay_val,
-        on_change=update_delay_slider
-    )
+# 3. CORRUPÇÃO (AWGN)
+st.sidebar.write("Corrupção/Ruído (%)")
+c5, c6 = st.sidebar.columns([3, 1])
+with c5: st.slider("", 0.0, 2.0, step=0.01, key='corrupt_slider', value=st.session_state.corrupt_val, on_change=update_corrupt_slider, format="%.2f")
+with c6: st.number_input("", 0.0, 2.0, step=0.01, key='corrupt_input', value=st.session_state.corrupt_val, on_change=update_corrupt_input, label_visibility="collapsed")
 
-with col4:
-    st.number_input(
-        "", min_value=0, max_value=2000, step=50,
-        key='delay_input', value=st.session_state.delay_val,
-        on_change=update_delay_input, label_visibility="collapsed"
-    )
+# 4. DUPLICAÇÃO (CLONES) - NOVO!
+st.sidebar.write("Duplicação (%)")
+c7, c8 = st.sidebar.columns([3, 1])
+with c7: 
+    st.slider("", 0.0, 5.0, step=0.1, key='dup_slider', value=st.session_state.dup_val, on_change=update_dup_slider, format="%.1f", help="Pacotes chegam duplicados. Testa se o servidor sabe filtrar.")
+with c8: 
+    st.number_input("", 0.0, 5.0, step=0.1, key='dup_input', value=st.session_state.dup_val, on_change=update_dup_input, label_visibility="collapsed")
 
-# --- BOTÃO DE APLICAR ---
+
 if st.sidebar.button("⚡ Aplicar Caos"):
     status = "ON" if chaos_active else "OFF"
-    # Pega o valor da session_state que está sincronizado
     loss = st.session_state.loss_val
     delay = st.session_state.delay_val
+    corrupt = st.session_state.corrupt_val
+    duplicate = st.session_state.dup_val
     
-    config_str = f"{status} {loss:.2f}% {delay}ms"
+    # Salva os 4 parâmetros no arquivo
+    config_str = f"{status} {loss:.2f} {delay} {corrupt:.2f} {duplicate:.2f}"
     
     with open("chaos_config.txt", "w") as f:
         f.write(config_str)
         
     if chaos_active:
-        st.sidebar.error(f"Caos ATIVADO: {loss:.2f}% / {delay}ms")
+        st.sidebar.error(f"ATIVO: Loss {loss}% | Delay {delay}ms | Noise {corrupt}% | Dup {duplicate}%")
     else:
         st.sidebar.success("Rede Normalizada")
 
