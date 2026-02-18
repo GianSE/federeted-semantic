@@ -7,7 +7,11 @@ import json
 from datetime import datetime
 
 app = Flask(__name__)
-received_weights = []
+
+# MUDANÇA 1: Usar Dicionário em vez de Lista
+# Isso garante que só guardamos o ULTIMO peso de cada cliente específico
+round_buffer = {} 
+REQUIRED_CLIENTS = 2 # Quantos clientes únicos precisamos para fechar a rodada
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -20,6 +24,8 @@ def log_terminal(msg):
     with open(LOG_FILE, "a") as f:
         f.write(formatted_msg + "\n")
 
+# Se você já aplicou a "Agregação Mascarada" (do passo anterior), mantenha aquela lógica.
+# Esta função abaixo é a versão compatível com seu código original/atual.
 def reconstruct_weights(partial_weights, node_id):
     reconstructed = {}
     missing_count = 0
@@ -29,6 +35,11 @@ def reconstruct_weights(partial_weights, node_id):
         arr = np.array(value_list, dtype=np.float32)
         total_count += arr.size
         
+        # Se for None (do envio comprimido Top-K ou random), tratamos aqui
+        # Se o array vier com None/NaN, substituímos por 0 ou média
+        if arr.dtype == object: # Caso tenha Nones misturados
+            arr = arr.astype(float) # Converte Nones para Nan
+            
         nans = np.isnan(arr)
         missing = np.sum(nans)
         missing_count += missing
@@ -44,8 +55,6 @@ def reconstruct_weights(partial_weights, node_id):
     if missing_count > 0:
         percent = (missing_count / total_count) * 100
         log_terminal(f"🔧 GenIA: {node_id} enviou comprimido. Reconstruindo {percent:.1f}%...")
-    else:
-        log_terminal(f"📥 Recebido pacote completo de {node_id}.")
 
     return reconstructed
 
@@ -56,14 +65,21 @@ def upload_weights():
         node_id = data.get('node_id', 'unknown')
         loss = data.get('loss', 0)
         
-        log_terminal(f"📡 Conexão de: {node_id} | Loss: {loss:.4f}")
-        
+        # MUDANÇA 2: Lógica de Buffer
+        # Se esse cliente já mandou nessa rodada, avisamos que foi atualizado
+        if node_id in round_buffer:
+            log_terminal(f"♻️  {node_id} enviou de novo (Full é rápido!). Atualizando buffer...")
+        else:
+            log_terminal(f"cw  Recebido de: {node_id} | Aguardando parceiros...")
+
+        # Processa e guarda no dicionário (sobrescreve se já existir)
         full_weights_reconstructed = reconstruct_weights(data['weights'], node_id)
-        received_weights.append(full_weights_reconstructed)
+        round_buffer[node_id] = full_weights_reconstructed
         
         log_to_db(node_id, len(str(data['weights'])), loss)
         
-        if len(received_weights) >= 2:
+        # Verifica se temos todos os clientes ÚNICOS necessários
+        if len(round_buffer) >= REQUIRED_CLIENTS:
             aggregate_weights()
             
         return jsonify({"status": "accepted"}), 200
@@ -72,22 +88,28 @@ def upload_weights():
         return jsonify({"error": str(e)}), 500
 
 def aggregate_weights():
-    global received_weights
-    log_terminal("✨ Iniciando Agregação (FedAvg)...")
+    global round_buffer
+    log_terminal(f"✨ Todos ({len(round_buffer)}) chegaram! Iniciando FedAvg...")
+    
     try:
         new_state_dict = {}
-        keys = received_weights[0].keys()
+        # Pega as chaves do primeiro cliente do buffer
+        first_client = next(iter(round_buffer.values()))
+        keys = first_client.keys()
+        
         for key in keys:
-            tensors = [torch.tensor(client[key]) for client in received_weights]
+            # Pega os tensores de TODOS os clientes no buffer
+            tensors = [torch.tensor(client_weights[key]) for client_weights in round_buffer.values()]
             new_state_dict[key] = torch.mean(torch.stack(tensors), dim=0)
         
-        # --- O PULO DO GATO: SALVAR O MODELO ---
         torch.save(new_state_dict, "global_model.pth")
         
-        log_terminal(f"💾 Modelo Global salvo em 'global_model.pth'!")
-        log_terminal(f"🧠 Conhecimento Agregado! (2 clientes)")
-        log_terminal("♻️  Limpando buffer...\n")
-        received_weights = [] 
+        log_terminal(f"💾 Modelo Global v{datetime.now().strftime('%H%M%S')} salvo!")
+        
+        # MUDANÇA 3: Limpar o Dicionário para a próxima rodada
+        round_buffer.clear() 
+        log_terminal("🏁 Rodada finalizada. Buffer limpo.\n")
+        
     except Exception as e:
         log_terminal(f"❌ Erro na agregação: {e}")
 
@@ -104,5 +126,5 @@ def log_to_db(node_id, bytes_sent, loss):
         log_terminal(f"⚠️ Erro ao salvar no DB: {e}")
 
 if __name__ == "__main__":
-    with open(LOG_FILE, "w") as f: f.write("=== SERVIDOR INICIADO ===\n")
+    with open(LOG_FILE, "w") as f: f.write("=== SERVIDOR SINCRONIZADO INICIADO ===\n")
     app.run(host='0.0.0.0', port=5000)

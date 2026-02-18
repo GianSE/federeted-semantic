@@ -21,7 +21,6 @@ def tokenize_text(text, size=MAX_LEN):
 
 def detokenize_text(logits):
     """Converte Logits (Probabilidades) -> Texto"""
-    # Pega o índice com maior probabilidade (Argmax)
     if logits.dim() == 3:
         indices = torch.argmax(logits, dim=2).squeeze().tolist()
     else:
@@ -31,7 +30,11 @@ def detokenize_text(logits):
         
     chars = []
     for idx in indices:
-        # 0 é padding, ignoramos. 
+        # Se encontrar um 0 (padding), PARE imediatamente.
+        # Isso evita mostrar lixo se o modelo alucinar no final.
+        if idx == 0:
+            break 
+            
         if idx > 0 and idx < VOCAB_SIZE:
             chars.append(chr(idx))
             
