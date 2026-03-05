@@ -1,8 +1,7 @@
-torch
-torchvision
 numpy
 pandas
-duckdb
 flask
 requests
 streamlit
+matplotlib
+Pillow

@@ -1,0 +1,291 @@
+\documentclass[conference]{IEEEtran}
+
+% ========================
+% PACOTES
+% ========================
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazilian]{babel}
+\usepackage{cite}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{acronym}
+\usepackage{xcolor}
+\usepackage{listings}
+
+% Nomes em português
+\floatname{algorithm}{Algoritmo}
+\renewcommand{\algorithmicrequire}{\textbf{Entrada:}}
+\renewcommand{\algorithmicensure}{\textbf{Saída:}}
+\renewcommand{\algorithmicfor}{\textbf{para}}
+\renewcommand{\algorithmicdo}{\textbf{faça}}
+\renewcommand{\algorithmicend}{\textbf{fim}}
+\renewcommand{\algorithmicif}{\textbf{se}}
+\renewcommand{\algorithmicthen}{\textbf{então}}
+\renewcommand{\algorithmicreturn}{\textbf{retorne}}
+
+\renewcommand{\IEEEkeywordsname}{Palavras-chave}
+
+% ========================
+% DOCUMENTO
+% ========================
+\begin{document}
+
+\title{Aprendizado Federado para Comunicação Semântica\\de Imagens: Um Testbed Containerizado com\\Injeção de Caos}
+
+\author{
+\IEEEauthorblockN{Gian}
+\IEEEauthorblockA{Departamento de Engenharia\\
+Universidade\\
+Email: gian@email.com}
+}
+
+\maketitle
+
+% ========================
+% RESUMO
+% ========================
+\begin{abstract}
+Este trabalho apresenta um framework containerizado para investigar a comunicação semântica de imagens utilizando aprendizado federado. O sistema emprega um autoencoder convolucional treinado de forma distribuída entre múltiplos dispositivos simulados por contêineres Docker, permitindo a compressão de imagens do dataset MNIST de 784 pixels para apenas 32 valores no espaço latente — uma redução de aproximadamente 96\%. O treinamento federado utiliza o algoritmo FedAvg com compressão Top-K dos pesos do modelo, enquanto um mecanismo de injeção de caos baseado em \texttt{tc netem} permite avaliar a resiliência do sistema sob condições adversas de rede, incluindo perda de pacotes, latência variável, corrupção e duplicação. Os experimentos demonstram que é possível transmitir informação semântica de imagens entre dispositivos de forma eficiente, mesmo quando apenas uma fração dos dados originais é compartilhada.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Aprendizado Federado, Comunicação Semântica, Autoencoder, Docker, Injeção de Caos, Compressão de Imagens
+\end{IEEEkeywords}
+
+% ========================
+% ACRÔNIMOS
+% ========================
+\input{acronym}
+
+% ========================
+% SEÇÃO 1: INTRODUÇÃO
+% ========================
+\section{Introdução}
+
+O crescimento exponencial de dispositivos conectados na Internet das Coisas (IoT) e em redes sem fio de nova geração tem gerado desafios significativos em termos de largura de banda, latência e privacidade dos dados. Sistemas tradicionais de comunicação focam em transmitir bits com máxima fidelidade, sem considerar o significado subjacente da informação \cite{shannon1948}. Nesse contexto, a \textbf{comunicação semântica} surge como um paradigma promissor, no qual apenas a essência da informação é transmitida, reduzindo drasticamente a quantidade de dados necessários \cite{xie2021deep}.
+
+Paralelamente, o \textbf{\ac{FL}} consolidou-se como uma abordagem fundamental para treinar modelos de aprendizado de máquina de forma descentralizada, onde cada dispositivo treina localmente sobre seus dados e compartilha apenas os parâmetros do modelo — nunca os dados brutos \cite{mcmahan2017}. Essa propriedade é particularmente relevante em cenários de comunicação sem fio, onde a transmissão de dados completos pode ser impraticável ou insegura.
+
+Este trabalho propõe a integração dessas duas abordagens em um \textbf{testbed prático e reprodutível}, utilizando contêineres Docker para simular um cenário distribuído de comunicação semântica de imagens. A arquitetura é composta por cinco contêineres: um servidor de agregação federada, dois clientes (um estável e um instável), um painel de visualização e um injetor de caos de rede.
+
+O modelo utilizado é um \textbf{autoencoder convolucional} que comprime imagens MNIST (28$\times$28 pixels) para um vetor latente de apenas 32 dimensões. Esse vetor representa a informação semântica da imagem e pode ser transmitido entre dispositivos com uma economia de mais de 96\% em relação aos dados originais. No dispositivo receptor, o decoder reconstrói a imagem completa a partir dessa representação compacta.
+
+As principais contribuições deste trabalho são:
+
+\begin{itemize}
+    \item Um framework containerizado para treinamento federado e comunicação semântica de imagens, facilmente reprodutível via Docker Compose;
+    \item Um autoencoder convolucional como codec semântico, comprimindo imagens de 784 para 32 valores;
+    \item Compressão Top-K dos pesos do modelo (60\% de esparsidade) para reduzir o custo de comunicação durante o treinamento federado;
+    \item Um mecanismo de injeção de caos para avaliar a robustez do sistema sob condições adversas de rede.
+\end{itemize}
+
+O restante do artigo está organizado da seguinte forma: a Seção~\ref{sec:related} apresenta os trabalhos relacionados; a Seção~\ref{sec:system} descreve a arquitetura proposta em detalhes; a Seção~\ref{sec:results} apresenta os resultados experimentais; e a Seção~\ref{sec:conclusion} conclui o trabalho com discussões e direções futuras.
+
+
+% ========================
+% SEÇÃO 2: TRABALHOS RELACIONADOS
+% ========================
+\section{Trabalhos Relacionados}
+\label{sec:related}
+
+\subsection{Aprendizado Federado}
+
+O \ac{FL} foi formalizado por McMahan et al. \cite{mcmahan2017}, que propuseram o algoritmo FedAvg para agregar modelos treinados localmente em múltiplos dispositivos. Desde então, diversas extensões foram propostas para lidar com heterogeneidade de dados (non-IID) \cite{zhao2018federated}, eficiência de comunicação \cite{konevcny2016federated} e robustez contra falhas \cite{blanchard2017machine}. Li et al. \cite{li2020federated} apresentaram uma visão abrangente dos desafios e oportunidades do \ac{FL}, destacando a necessidade de mecanismos eficientes de compressão para comunicação em redes com largura de banda limitada.
+
+\subsection{Comunicação Semântica}
+
+A comunicação semântica, inspirada nos trabalhos seminais de Shannon e Weaver \cite{shannon1948}, tem ganhado impulso com a integração de técnicas de deep learning. O DeepSC \cite{xie2021deep} foi um dos primeiros sistemas a utilizar redes neurais para codificação e decodificação semântica de texto. Bourtsoulatze et al. \cite{bourtsoulatze2019deep} propuseram o uso de autoencoders para transmissão conjunta de fonte e canal em imagens. Mais recentemente, Weng e Qin \cite{weng2021semantic} investigaram comunicação semântica para imagens utilizando \ac{JSCC}.
+
+\subsection{Testbeds e Avaliação Prática}
+
+A maioria dos trabalhos na área utiliza simulações idealizadas. Poucos oferecem implementações práticas com injeção de falhas de rede. O conceito de engenharia de caos, popularizado pela Netflix \cite{basiri2016chaos}, foi adaptado para redes com ferramentas como \texttt{tc netem} do Linux, que permite simular perda de pacotes, latência e corrupção de dados em interfaces de rede reais. Neste trabalho, aplicamos esse conceito ao treinamento federado para avaliar a resiliência do sistema.
+
+
+% ========================
+% SEÇÃO 3: SISTEMA PROPOSTO
+% ========================
+\section{Sistema Proposto}
+\label{sec:system}
+
+\subsection{Arquitetura Containerizada}
+
+O sistema é composto por cinco contêineres Docker orquestrados via Docker Compose, conforme ilustrado na Tabela~\ref{tab:containers}:
+
+\begin{table}[h]
+\centering
+\caption{Contêineres do sistema e suas funções}
+\label{tab:containers}
+\begin{tabular}{lp{5.2cm}}
+\toprule
+\textbf{Contêiner} & \textbf{Função} \\
+\midrule
+\texttt{fl-server} & Servidor Flask que recebe pesos dos clientes, executa agregação FedAvg e disponibiliza o modelo global \\
+\texttt{client-full} & Cliente estável que treina localmente e envia pesos completos ao servidor \\
+\texttt{client-noisy} & Cliente instável que aplica compressão Top-K antes de enviar os pesos \\
+\texttt{dashboard} & Painel Streamlit para visualização, testes de comunicação e controle de caos \\
+\texttt{chaos-injector} & Aplica regras \texttt{tc netem} na interface de rede do cliente instável \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Todos os contêineres compartilham a mesma imagem base Python 3.9 com PyTorch, conectados através de uma rede Docker bridge dedicada (\texttt{fl-network}). O injetor de caos opera no namespace de rede do cliente instável via \texttt{network\_mode: service:client-noisy}, permitindo manipular diretamente o tráfego desse contêiner.
+
+\subsection{Autoencoder Convolucional}
+
+O modelo central do sistema é um autoencoder convolucional projetado para comprimir e reconstruir imagens MNIST (1$\times$28$\times$28). A arquitetura é dividida em duas partes:
+
+\textbf{Encoder (Compressor):} Duas camadas convolucionais (Conv2d) com ativação ReLU e max-pooling, seguidas de duas camadas totalmente conectadas. A entrada de 784 pixels é progressivamente reduzida até um vetor latente de 32 dimensões.
+
+\textbf{Decoder (Reconstrutor):} Duas camadas totalmente conectadas seguidas de duas camadas de convolução transposta (ConvTranspose2d), com ativação Sigmoid na saída para garantir valores entre 0 e 1.
+
+A função de perda utilizada para treinamento é o \ac{MSE}:
+
+\begin{equation}
+\mathcal{L}_{\text{MSE}} = \frac{1}{N} \sum_{i=1}^{N} \| \mathbf{x}_i - \hat{\mathbf{x}}_i \|^2
+\label{eq:mse}
+\end{equation}
+
+\noindent onde $\mathbf{x}_i$ é a imagem original e $\hat{\mathbf{x}}_i$ é a imagem reconstruída pelo decoder.
+
+A taxa de compressão alcançada é:
+
+\begin{equation}
+R_c = \frac{D_{\text{latente}}}{D_{\text{original}}} = \frac{32}{784} \approx 4{,}1\%
+\label{eq:compression}
+\end{equation}
+
+\noindent o que significa que apenas 4,1\% dos dados originais precisam ser transmitidos para que o receptor reconstrua a imagem completa.
+
+\subsection{Treinamento Federado}
+
+O treinamento é realizado de forma distribuída utilizando o algoritmo FedAvg \cite{mcmahan2017}. Em cada rodada:
+
+\begin{enumerate}
+    \item Cada cliente carrega o modelo global mais recente;
+    \item Treina localmente por 5 épocas usando um batch de 32 imagens MNIST;
+    \item Envia os pesos atualizados ao servidor;
+    \item O servidor agrega os pesos recebidos calculando a média:
+\end{enumerate}
+
+\begin{equation}
+\mathbf{w}^{(t+1)} = \frac{1}{K} \sum_{k=1}^{K} \mathbf{w}_k^{(t+1)}
+\label{eq:fedavg}
+\end{equation}
+
+\noindent onde $K$ é o número de clientes e $\mathbf{w}_k^{(t+1)}$ são os pesos do cliente $k$ após o treinamento local na rodada $t$.
+
+O cliente instável (\texttt{client-noisy}) aplica compressão Top-K antes do envio, mantendo apenas os 40\% dos pesos com maior valor absoluto e zerando os demais. Isso reduz significativamente o volume de dados transmitidos, simulando um cenário de comunicação com largura de banda limitada. O servidor reconstrói os pesos faltantes utilizando imputação pela média (substituindo valores ausentes pela média dos pesos recebidos de outros clientes).
+
+\subsection{Comunicação Semântica de Imagens}
+
+O sistema permite dois modos de teste de comunicação semântica, acessíveis pelo painel de visualização:
+
+\textbf{Modo Compressão:} Uma imagem é codificada pelo encoder em um vetor de 32 dimensões, que é transmitido ao servidor. O servidor utiliza o decoder do modelo global para reconstruir a imagem completa. Esse modo demonstra que é possível transmitir a ``essência'' visual de uma imagem usando menos de 5\% dos dados originais.
+
+\textbf{Modo Completação:} Parte da imagem é mascarada (metade inferior, pixels aleatórios ou metade direita) antes de ser processada pelo autoencoder. O modelo reconstrói tanto a parte visível quanto a parte oculta, demonstrando capacidade de inferência semântica — o modelo ``entende'' o conteúdo e completa a informação faltante.
+
+\subsection{Injeção de Caos}
+
+O mecanismo de injeção de caos utiliza a ferramenta \texttt{tc netem} do Linux para alterar dinamicamente as condições de rede do cliente instável. Quatro parâmetros são configuráveis em tempo real pelo painel:
+
+\begin{itemize}
+    \item \textbf{Perda de pacotes} (0--5\%): simula descarte de pacotes na rede;
+    \item \textbf{Latência} (0--2000 ms): adiciona atraso na comunicação;
+    \item \textbf{Corrupção} (0--2\%): altera bits aleatórios nos pacotes;
+    \item \textbf{Duplicação} (0--5\%): duplica pacotes na transmissão.
+\end{itemize}
+
+Essas condições afetam diretamente a troca de pesos entre o cliente instável e o servidor durante o treinamento federado, permitindo avaliar como o sistema se comporta sob degradação de rede.
+
+
+% ========================
+% SEÇÃO 4: RESULTADOS
+% ========================
+\section{Resultados Experimentais}
+\label{sec:results}
+
+\subsection{Configuração Experimental}
+
+Os experimentos foram conduzidos utilizando Docker Desktop em ambiente local. O dataset utilizado é o MNIST \cite{lecun1998gradient}, contendo 60.000 imagens de treinamento e 10.000 de teste (dígitos manuscritos, 28$\times$28 pixels, escala de cinza). A Tabela~\ref{tab:params} apresenta os principais parâmetros do sistema.
+
+\begin{table}[h]
+\centering
+\caption{Parâmetros experimentais}
+\label{tab:params}
+\begin{tabular}{ll}
+\toprule
+\textbf{Parâmetro} & \textbf{Valor} \\
+\midrule
+Dataset & MNIST (28$\times$28, 1 canal) \\
+Dimensão do espaço latente & 32 \\
+Taxa de compressão & 96\% (784 $\rightarrow$ 32) \\
+Épocas locais por rodada & 5 \\
+Batch size & 32 imagens \\
+Otimizador & Adam (lr = 0.001) \\
+Compressão Top-K (cliente instável) & 60\% esparsidade \\
+Número de clientes & 2 \\
+Framework & PyTorch 2.x \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Convergência do Treinamento}
+
+\textcolor{red}{[PLACEHOLDER: Inserir gráfico de convergência da loss (MSE) ao longo das rodadas de treinamento federado. Comparar a curva do cliente estável (full) com a do cliente instável (noisy). Espera-se que o cliente noisy apresente convergência mais lenta ou irregular devido à compressão Top-K e às condições de rede adversas.]}
+
+\subsection{Qualidade da Reconstrução}
+
+\textcolor{red}{[PLACEHOLDER: Inserir figura com exemplos de imagens originais e suas reconstruções via autoencoder. Incluir métricas de MSE e PSNR. Mostrar exemplos com e sem condições de caos. Espera-se PSNR acima de 20 dB para reconstruções sem caos.]}
+
+\subsection{Teste de Completação}
+
+\textcolor{red}{[PLACEHOLDER: Inserir figura mostrando: (a) imagem original, (b) imagem com metade inferior mascarada, (c) reconstrução pelo autoencoder. Reportar MSE e PSNR para diferentes porcentagens de mascaramento (25\%, 50\%, 75\%).]}
+
+\subsection{Impacto do Caos na Comunicação}
+
+A Tabela~\ref{tab:chaos_results} apresenta cenários de teste com diferentes configurações de caos e seus efeitos esperados.
+
+\begin{table}[h]
+\centering
+\caption{Cenários de injeção de caos}
+\label{tab:chaos_results}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Cenário} & \textbf{Perda} & \textbf{Latência} & \textbf{Corrup.} & \textbf{Dup.} \\
+\midrule
+Normal & 0\% & 0 ms & 0\% & 0\% \\
+Leve & 1\% & 200 ms & 0\% & 0\% \\
+Moderado & 3\% & 500 ms & 0.5\% & 1\% \\
+Severo & 5\% & 1000 ms & 2\% & 5\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textcolor{red}{[PLACEHOLDER: Inserir resultados comparativos para cada cenário. Reportar: (1) MSE final do modelo global, (2) número de rodadas para convergência, (3) taxa de falha na comunicação dos pesos, (4) PSNR médio da reconstrução.]}
+
+
+% ========================
+% SEÇÃO 5: CONCLUSÃO
+% ========================
+\section{Conclusão}
+\label{sec:conclusion}
+
+Este trabalho apresentou um framework containerizado para comunicação semântica de imagens baseado em aprendizado federado. O sistema demonstra que é possível comprimir imagens MNIST de 784 pixels para apenas 32 valores no espaço latente (redução de 96\%) e reconstruí-las em outro dispositivo com qualidade satisfatória. O uso de contêineres Docker permite simular um cenário distribuído realista, onde diferentes dispositivos colaboram no treinamento de um modelo compartilhado sem trocar dados brutos.
+
+O mecanismo de injeção de caos, baseado em \texttt{tc netem}, permite avaliar a resiliência do sistema sob condições de rede adversas, demonstrando como a perda de pacotes, latência e corrupção afetam a convergência do treinamento federado e a qualidade da comunicação semântica.
+
+Para trabalhos futuros, pretendemos: (i) estender o sistema para datasets mais complexos como CIFAR-10 e imagens médicas; (ii) investigar técnicas de codificação conjunta de fonte e canal (JSCC); (iii) implementar mecanismos adaptativos de compressão que se ajustem dinamicamente às condições da rede; e (iv) escalar o testbed para mais clientes com distribuições de dados heterogêneas (non-IID).
+
+% ========================
+% REFERÊNCIAS
+% ========================
+\bibliographystyle{IEEEtran}
+\bibliography{ref}
+
+\end{document}

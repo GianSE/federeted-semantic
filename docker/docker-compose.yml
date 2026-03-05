@@ -1,17 +1,26 @@
 services:
+
+  # ============================
+  # Servidor FL (Agregação FedAvg)
+  # ============================
   fl-server:
     image: fl-app-image:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: fl_server
+    environment:
+      - MODE=server
     volumes:
       - ../src:/app
     networks:
       - fl-network
 
+  # ============================
+  # Cliente Estável (envia pesos completos)
+  # ============================
   client-full:
-    image: fl-app-image:latest  # <--- Reusa a mesma imagem!
+    image: fl-app-image:latest
     depends_on:
       - fl-server
     volumes:
@@ -23,8 +32,11 @@ services:
     networks:
       - fl-network
 
+  # ============================
+  # Cliente Instável (compressão Top-K + caos de rede)
+  # ============================
   client-noisy:
-    image: fl-app-image:latest  # <--- Reusa a mesma imagem!
+    image: fl-app-image:latest
     container_name: cliente_instavel
     depends_on:
       - fl-server
@@ -37,6 +49,9 @@ services:
     networks:
       - fl-network
 
+  # ============================
+  # Dashboard Streamlit (Visualização)
+  # ============================
   dashboard:
     image: fl-app-image:latest
     command: streamlit run dashboard.py --server.port 8501
@@ -44,16 +59,19 @@ services:
       - "8501:8501"
     volumes:
       - ../src:/app
+    environment:
+      - SERVER_URL=http://fl-server:5000
     networks:
       - fl-network
 
+  # ============================
+  # Injetor de Caos (tc netem no cliente instável)
+  # ============================
   chaos-injector:
     image: alpine:latest
     container_name: chaos_injector
-    # MUDANÇA 1: Montar o volume para compartilhar arquivos
     volumes:
       - ../src:/app
-    # MUDANÇA 2: Rodar o script de loop
     command: sh /app/chaos_loop.sh
     cap_add:
       - NET_ADMIN

@@ -8,10 +8,9 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# MUDANÇA 1: Usar Dicionário em vez de Lista
-# Isso garante que só guardamos o ULTIMO peso de cada cliente específico
-round_buffer = {} 
-REQUIRED_CLIENTS = 2 # Quantos clientes únicos precisamos para fechar a rodada
+# Buffer de pesos: dicionário garante apenas o último envio de cada cliente
+round_buffer = {}
+REQUIRED_CLIENTS = 2
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -24,9 +23,8 @@ def log_terminal(msg):
     with open(LOG_FILE, "a") as f:
         f.write(formatted_msg + "\n")
 
-# Se você já aplicou a "Agregação Mascarada" (do passo anterior), mantenha aquela lógica.
-# Esta função abaixo é a versão compatível com seu código original/atual.
 def reconstruct_weights(partial_weights, node_id):
+    """Reconstrói pesos comprimidos (Top-K) substituindo NaN pela média"""
     reconstructed = {}
     missing_count = 0
     total_count = 0
@@ -35,10 +33,8 @@ def reconstruct_weights(partial_weights, node_id):
         arr = np.array(value_list, dtype=np.float32)
         total_count += arr.size
         
-        # Se for None (do envio comprimido Top-K ou random), tratamos aqui
-        # Se o array vier com None/NaN, substituímos por 0 ou média
-        if arr.dtype == object: # Caso tenha Nones misturados
-            arr = arr.astype(float) # Converte Nones para Nan
+        if arr.dtype == object:
+            arr = arr.astype(float)
             
         nans = np.isnan(arr)
         missing = np.sum(nans)
@@ -54,7 +50,7 @@ def reconstruct_weights(partial_weights, node_id):
         
     if missing_count > 0:
         percent = (missing_count / total_count) * 100
-        log_terminal(f"🔧 GenIA: {node_id} enviou comprimido. Reconstruindo {percent:.1f}%...")
+        log_terminal(f"🔧 Reconstruindo pesos de {node_id}: {percent:.1f}% faltante preenchido por média")
 
     return reconstructed
 
@@ -65,20 +61,16 @@ def upload_weights():
         node_id = data.get('node_id', 'unknown')
         loss = data.get('loss', 0)
         
-        # MUDANÇA 2: Lógica de Buffer
-        # Se esse cliente já mandou nessa rodada, avisamos que foi atualizado
         if node_id in round_buffer:
-            log_terminal(f"♻️  {node_id} enviou de novo (Full é rápido!). Atualizando buffer...")
+            log_terminal(f"♻️  {node_id} reenviou. Atualizando buffer...")
         else:
-            log_terminal(f"cw  Recebido de: {node_id} | Aguardando parceiros...")
+            log_terminal(f"📥 Recebido de: {node_id} | Aguardando parceiros...")
 
-        # Processa e guarda no dicionário (sobrescreve se já existir)
         full_weights_reconstructed = reconstruct_weights(data['weights'], node_id)
         round_buffer[node_id] = full_weights_reconstructed
         
         log_to_db(node_id, len(str(data['weights'])), loss)
         
-        # Verifica se temos todos os clientes ÚNICOS necessários
         if len(round_buffer) >= REQUIRED_CLIENTS:
             aggregate_weights()
             
@@ -88,30 +80,88 @@ def upload_weights():
         return jsonify({"error": str(e)}), 500
 
 def aggregate_weights():
+    """FedAvg: média dos pesos de todos os clientes"""
     global round_buffer
     log_terminal(f"✨ Todos ({len(round_buffer)}) chegaram! Iniciando FedAvg...")
     
     try:
         new_state_dict = {}
-        # Pega as chaves do primeiro cliente do buffer
         first_client = next(iter(round_buffer.values()))
         keys = first_client.keys()
         
         for key in keys:
-            # Pega os tensores de TODOS os clientes no buffer
             tensors = [torch.tensor(client_weights[key]) for client_weights in round_buffer.values()]
             new_state_dict[key] = torch.mean(torch.stack(tensors), dim=0)
         
         torch.save(new_state_dict, "global_model.pth")
         
-        log_terminal(f"💾 Modelo Global v{datetime.now().strftime('%H%M%S')} salvo!")
+        log_terminal(f"💾 Modelo Global salvo!")
         
-        # MUDANÇA 3: Limpar o Dicionário para a próxima rodada
-        round_buffer.clear() 
+        round_buffer.clear()
         log_terminal("🏁 Rodada finalizada. Buffer limpo.\n")
         
     except Exception as e:
         log_terminal(f"❌ Erro na agregação: {e}")
+
+@app.route('/reconstruct', methods=['POST'])
+def reconstruct_image():
+    """
+    Endpoint de comunicação semântica:
+    Recebe vetor latente (32 dims) e retorna imagem reconstruída (28x28).
+    Simula: Dispositivo A envia representação comprimida → Dispositivo B reconstrói.
+    """
+    try:
+        from model_utils import ImageAutoencoder
+        
+        data = request.json
+        latent = torch.tensor(data['latent'], dtype=torch.float32).unsqueeze(0)
+        
+        model = ImageAutoencoder()
+        if os.path.exists("global_model.pth"):
+            model.load_state_dict(torch.load("global_model.pth", map_location="cpu"))
+        model.eval()
+        
+        with torch.no_grad():
+            recon = model.decode(latent)
+        
+        return jsonify({
+            "status": "ok",
+            "image": recon.squeeze().numpy().tolist()
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/complete', methods=['POST'])
+def complete_image():
+    """
+    Endpoint de completação de imagem:
+    Recebe imagem parcial (mascarada) → Autoencoder reconstrói imagem completa.
+    Simula: envio de pedaços da imagem, modelo completa o restante.
+    """
+    try:
+        from model_utils import ImageAutoencoder
+        
+        data = request.json
+        partial = torch.tensor(data['image'], dtype=torch.float32)
+        if partial.dim() == 2:
+            partial = partial.unsqueeze(0).unsqueeze(0)  # [1, 1, 28, 28]
+        elif partial.dim() == 3:
+            partial = partial.unsqueeze(0)
+        
+        model = ImageAutoencoder()
+        if os.path.exists("global_model.pth"):
+            model.load_state_dict(torch.load("global_model.pth", map_location="cpu"))
+        model.eval()
+        
+        with torch.no_grad():
+            recon = model(partial)  # Encode parcial → Decode completo
+        
+        return jsonify({
+            "status": "ok",
+            "image": recon.squeeze().numpy().tolist()
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 def log_to_db(node_id, bytes_sent, loss):
     try:
@@ -126,5 +176,5 @@ def log_to_db(node_id, bytes_sent, loss):
         log_terminal(f"⚠️ Erro ao salvar no DB: {e}")
 
 if __name__ == "__main__":
-    with open(LOG_FILE, "w") as f: f.write("=== SERVIDOR SINCRONIZADO INICIADO ===\n")
+    with open(LOG_FILE, "w") as f: f.write("=== SERVIDOR FL INICIADO ===\n")
     app.run(host='0.0.0.0', port=5000)

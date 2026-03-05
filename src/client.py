@@ -7,7 +7,6 @@ import torch.optim as optim
 import copy
 import numpy as np
 from datetime import datetime
-from text_utils import detokenize_text
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -27,105 +26,83 @@ def calculate_weight_diff(model_before, model_after):
 
 def compress_weights_top_k(weight_dict, compression_ratio=0.5):
     """
-    Mantém apenas os X% pesos mais fortes (maior valor absoluto).
-    Zera o restante para economizar banda (simulado).
+    Mantém apenas os X% pesos mais significativos (maior valor absoluto).
+    Zera o restante para economizar banda de comunicação.
     """
     compressed_payload = {}
     
     for key, value in weight_dict.items():
-        tensor = value.cpu() # Garante que está na CPU
+        tensor = value.cpu()
         flattened = tensor.abs().flatten()
         num_params = flattened.numel()
-        k = int(num_params * (1 - compression_ratio)) # Quantos vamos manter
+        k = int(num_params * (1 - compression_ratio))
         
-        if k < 1: 
-            # Se for muito pequeno, mantém tudo ou nada
+        if k < 1:
             compressed_payload[key] = value.numpy().tolist()
             continue
 
-        # Encontra o valor de corte (threshold) para estar no Top-K
         threshold_value = torch.kthvalue(flattened, num_params - k + 1).values.item()
-
-        # Cria a máscara: Mantém só o que for maior que o threshold
         mask = tensor.abs() >= threshold_value
         
-        # Aplica a máscara: O que for False vira None (para o JSON ficar leve/nulo)
-        # Nota: Ao enviar 'None' em JSON, economizamos banda real se usarmos compressão gzip no transporte
         arr_numpy = value.numpy()
         compressed_payload[key] = np.where(mask.numpy(), np.round(arr_numpy, 4), None).tolist()
         
     return compressed_payload
 
-def train_and_upload(model, data, targets, server_url, node_id, text=""):
+def train_and_upload(model, images, server_url, node_id):
+    """Treina o autoencoder de imagens localmente e envia pesos ao servidor"""
     try:
         model_before = copy.deepcopy(model)
         
-        # Otimizador Adam é melhor para LSTMs complexas
-        optimizer = optim.Adam(model.parameters(), lr=0.005)
-        
-        # Loss para classificação de texto (prevê qual letra é a próxima)
-        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=0.001)
+        criterion = nn.MSELoss()  # Reconstrução de imagens
         model.train()
 
-        # --- TESTE INICIAL ---
-        with torch.no_grad():
-            logits = model(data)
-            reconstructed = detokenize_text(logits)
-        
-        log_terminal(f"👁️ Lê: '{text}'", node_id)
-        log_terminal(f"🗣️ Diz: '{reconstructed}'", node_id)
-        
-        # --- TREINO ---
-        log_terminal(f"🔥 Treinando Deep LSTM...", node_id)
-        epochs = 10 # Modelos grandes aprendem rápido com poucos dados repetidos
+        # --- TREINO LOCAL ---
+        log_terminal(f"🔥 Treinando Autoencoder ({images.shape[0]} imagens)...", node_id)
+        epochs = 5
         final_loss = 0
         
         for epoch in range(epochs):
             optimizer.zero_grad()
-            output_logits = model(data) # [1, 30, 128]
-            
-            # Ajusta formatos para CrossEntropy: (Batch*Seq, Vocab) vs (Batch*Seq)
-            loss = criterion(output_logits.view(-1, 128), targets.view(-1))
-            
+            reconstructed = model(images)
+            loss = criterion(reconstructed, images)  # Autoencoder: entrada = saída desejada
             loss.backward()
             optimizer.step()
             final_loss = loss.item()
 
-        weight_change = calculate_weight_diff(model_before, model)
-        log_terminal(f"🧠 Loss: {final_loss:.4f}", node_id)
+        # Info de compressão semântica
+        with torch.no_grad():
+            z = model.encode(images)
+            pixels = images.numel()
+            latent_size = z.numel()
+            compression = pixels / latent_size
+        
+        log_terminal(f"📊 Loss: {final_loss:.6f} | Compressão semântica: {compression:.0f}x ({latent_size} vs {pixels} valores)", node_id)
 
-        # --- ENVIO (Compressão Inteligente) ---
+        # --- ENVIO DOS PESOS ---
         full_weights = model.state_dict()
         
         if "full" not in node_id:
-            log_terminal("⚠️ [GenIA] Aplicando Compressão Semântica (Top-K)...", node_id)
-            # Envia apenas os 40% pesos mais importantes (60% de compressão)
+            log_terminal("⚠️ Aplicando Compressão Top-K (60%)...", node_id)
             final_payload = compress_weights_top_k(full_weights, compression_ratio=0.6)
         else:
-            # Cliente Full envia tudo normal
             final_payload = {k: v.cpu().numpy().tolist() for k, v in full_weights.items()}
 
-        # ... dentro da função train_and_upload ...
-
-        log_terminal(f"🚀 Enviando...", node_id)
+        log_terminal(f"🚀 Enviando pesos ao servidor...", node_id)
         
         try:
-            # ADICIONE O TIMEOUT=5 (segundos)
             requests.post(f"{server_url}/upload_weights", json={
                 "client_id": node_id, 
                 "weights": final_payload, 
                 "loss": final_loss, 
                 "node_id": node_id
-            }, timeout=30) # <--- MUDANÇA AQUI: Se demorar > 30s, aborta.
+            }, timeout=30)
+            log_terminal(f"✅ Pesos enviados com sucesso!", node_id)
+        except requests.exceptions.Timeout:
+            log_terminal(f"⏰ Timeout ao enviar (rede instável)!", node_id)
+        except requests.exceptions.ConnectionError:
+            log_terminal(f"❌ Erro de conexão com o servidor!", node_id)
             
-            log_terminal("✅ Enviado.\n", node_id)
-
-        # MUDANÇA AQUI: Agrupe Timeout e ConnectionError
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
-            log_terminal("⚠️ Rede instável (Timeout ou Falha de Conexão). Pulando...", node_id)
-            
-        except Exception as e:
-            log_terminal(f"❌ Erro Crítico: {str(e)[:20]}...", node_id)
-
     except Exception as e:
-        log_terminal(f"❌ Erro: {e}", node_id)
+        log_terminal(f"❌ Erro no treino: {e}", node_id)
