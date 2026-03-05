@@ -15,7 +15,7 @@ def log_terminal(msg, node_id="unknown"):
     timestamp = datetime.now().strftime("%H:%M:%S")
     formatted_msg = f"[{timestamp}] {msg}"
     print(formatted_msg, flush=True)
-    with open(os.path.join(LOG_DIR, f"{node_id}.log"), "a") as f:
+    with open(os.path.join(LOG_DIR, f"{node_id}.log"), "a", encoding="utf-8") as f:
         f.write(formatted_msg + "\n")
 
 def calculate_weight_diff(model_before, model_after):

@@ -5,12 +5,13 @@ import sqlite3
 import os
 import json
 from datetime import datetime
+from config import REQUIRED_CLIENTS, CHAOS_SCENARIO, TEST_BATCH_SIZE
 
 app = Flask(__name__)
 
 # Buffer de pesos: dicionário garante apenas o último envio de cada cliente
 round_buffer = {}
-REQUIRED_CLIENTS = 2
+current_round = 0
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -20,7 +21,7 @@ def log_terminal(msg):
     timestamp = datetime.now().strftime("%H:%M:%S")
     formatted_msg = f"[{timestamp}] {msg}"
     print(formatted_msg, flush=True)
-    with open(LOG_FILE, "a") as f:
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(formatted_msg + "\n")
 
 def reconstruct_weights(partial_weights, node_id):
@@ -64,25 +65,49 @@ def upload_weights():
         if node_id in round_buffer:
             log_terminal(f"♻️  {node_id} reenviou. Atualizando buffer...")
         else:
-            log_terminal(f"📥 Recebido de: {node_id} | Aguardando parceiros...")
+            log_terminal(f"📥 Recebido de: {node_id} | Aguardando parceiros... ({len(round_buffer)+1}/{REQUIRED_CLIENTS})")
 
         full_weights_reconstructed = reconstruct_weights(data['weights'], node_id)
         round_buffer[node_id] = full_weights_reconstructed
         
-        log_to_db(node_id, len(str(data['weights'])), loss)
+        log_to_db(node_id, len(str(data['weights'])), loss, current_round)
         
         if len(round_buffer) >= REQUIRED_CLIENTS:
             aggregate_weights()
             
-        return jsonify({"status": "accepted"}), 200
+        return jsonify({"status": "accepted", "round": current_round}), 200
     except Exception as e:
         log_terminal(f"❌ Erro no server: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+def evaluate_global_model():
+    """Avalia o modelo global em imagens de teste e retorna MSE e PSNR"""
+    try:
+        from model_utils import ImageAutoencoder
+        from image_utils import load_mnist, get_random_batch, compute_mse, compute_psnr
+        
+        model = ImageAutoencoder()
+        model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
+        model.eval()
+        
+        dataset = load_mnist(train=False)
+        images, _ = get_random_batch(dataset, batch_size=TEST_BATCH_SIZE)
+        
+        with torch.no_grad():
+            reconstructed = model(images)
+        
+        mse = compute_mse(images, reconstructed)
+        psnr = compute_psnr(images, reconstructed)
+        return mse, psnr
+    except Exception as e:
+        log_terminal(f"⚠️ Erro na avaliação: {e}")
+        return None, None
+
 def aggregate_weights():
     """FedAvg: média dos pesos de todos os clientes"""
-    global round_buffer
-    log_terminal(f"✨ Todos ({len(round_buffer)}) chegaram! Iniciando FedAvg...")
+    global round_buffer, current_round
+    current_round += 1
+    log_terminal(f"✨ Todos ({len(round_buffer)}) chegaram! Iniciando FedAvg... [Rodada {current_round}]")
     
     try:
         new_state_dict = {}
@@ -95,10 +120,16 @@ def aggregate_weights():
         
         torch.save(new_state_dict, "global_model.pth")
         
-        log_terminal(f"💾 Modelo Global salvo!")
+        log_terminal(f"💾 Modelo Global salvo! [Rodada {current_round}]")
+        
+        # Avaliação do modelo global
+        mse, psnr = evaluate_global_model()
+        if mse is not None:
+            log_terminal(f"📊 Avaliação Global: MSE={mse:.6f} | PSNR={psnr:.1f} dB")
+            log_round_metrics(current_round, mse, psnr)
         
         round_buffer.clear()
-        log_terminal("🏁 Rodada finalizada. Buffer limpo.\n")
+        log_terminal(f"🏁 Rodada {current_round} finalizada. Buffer limpo.\n")
         
     except Exception as e:
         log_terminal(f"❌ Erro na agregação: {e}")
@@ -163,18 +194,31 @@ def complete_image():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-def log_to_db(node_id, bytes_sent, loss):
+def log_to_db(node_id, bytes_sent, loss, round_number):
     try:
         conn = sqlite3.connect('metrics.db', timeout=10)
         cursor = conn.cursor()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute("INSERT INTO training_logs VALUES (?, ?, ?, ?)", 
-                     (timestamp, node_id, bytes_sent, loss))
+        cursor.execute("INSERT INTO training_logs VALUES (?, ?, ?, ?, ?)", 
+                     (timestamp, node_id, bytes_sent, loss, round_number))
         conn.commit()
         conn.close()
     except Exception as e:
         log_terminal(f"⚠️ Erro ao salvar no DB: {e}")
 
+def log_round_metrics(round_number, global_mse, global_psnr):
+    try:
+        conn = sqlite3.connect('metrics.db', timeout=10)
+        cursor = conn.cursor()
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        scenario = os.environ.get("CHAOS_SCENARIO", CHAOS_SCENARIO)
+        cursor.execute("INSERT INTO round_metrics VALUES (?, ?, ?, ?, ?)",
+                     (round_number, global_mse, global_psnr, timestamp, scenario))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log_terminal(f"⚠️ Erro ao salvar round_metrics: {e}")
+
 if __name__ == "__main__":
-    with open(LOG_FILE, "w") as f: f.write("=== SERVIDOR FL INICIADO ===\n")
+    with open(LOG_FILE, "w", encoding="utf-8") as f: f.write("=== SERVIDOR FL INICIADO ===\n")
     app.run(host='0.0.0.0', port=5000)

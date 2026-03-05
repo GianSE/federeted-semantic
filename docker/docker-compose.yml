@@ -50,6 +50,23 @@ services:
       - fl-network
 
   # ============================
+  # Cliente Non-IID (dados heterogêneos - apenas dígitos 0-3)
+  # ============================
+  client-noniid:
+    image: fl-app-image:latest
+    container_name: cliente_noniid
+    depends_on:
+      - fl-server
+    volumes:
+      - ../src:/app
+    environment:
+      - MODE=client
+      - SERVER_URL=http://fl-server:5000
+      - HOSTNAME=client-noniid
+    networks:
+      - fl-network
+
+  # ============================
   # Dashboard Streamlit (Visualização)
   # ============================
   dashboard:

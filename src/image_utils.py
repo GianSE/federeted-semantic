@@ -19,6 +19,14 @@ def load_mnist(train=True):
     )
     return dataset
 
+def load_mnist_filtered(train=True, allowed_labels=None):
+    """Carrega MNIST filtrado para apenas certos dígitos (Non-IID)"""
+    dataset = load_mnist(train=train)
+    if allowed_labels is None:
+        return dataset
+    indices = [i for i, (_, label) in enumerate(dataset) if label in allowed_labels]
+    return torch.utils.data.Subset(dataset, indices)
+
 def get_random_batch(dataset, batch_size=32):
     """Retorna um batch aleatório de imagens do dataset"""
     indices = torch.randperm(len(dataset))[:batch_size]
