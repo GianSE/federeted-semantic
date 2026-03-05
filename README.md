@@ -1,123 +1,225 @@
-# 🧠 Federated Learning com Compressão Semântica (GenIA)
+# 🛰️ Aprendizado Federado para Comunicação Semântica de Imagens
 
-> Um sistema de Aprendizado Federado resiliente a falhas de rede, utilizando Autoencoders para reconstrução semântica de dados perdidos.
+> Testbed containerizado que combina Aprendizado Federado (FedAvg) com um Autoencoder Convolucional para compressão semântica de imagens, incluindo injeção de caos de rede em tempo real.
 
-![Status](https://img.shields.io/badge/Status-Active-success)
-![Docker](https://img.shields.io/badge/Docker-Compose-blue)
-![Python](https://img.shields.io/badge/Python-3.9-yellow)
-![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-red)
+![Python](https://img.shields.io/badge/Python-3.9+-yellow)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED)
+![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-FF4B4B)
+
+---
 
 ## 📋 Sobre o Projeto
 
-Este projeto demonstra uma arquitetura de **Federated Learning (FL)** onde clientes treinam um modelo de IA localmente e enviam apenas os pesos para um servidor central.
+Este projeto implementa um sistema distribuído de **comunicação semântica de imagens** treinado via **Aprendizado Federado**. A ideia central é:
 
-A inovação principal é o módulo **GenIA**, que permite que clientes em redes instáveis ("Client Noisy") enviem dados comprimidos ou incompletos. O servidor utiliza técnicas de reconstrução semântica para preencher as lacunas antes da agregação global.
+1. Vários dispositivos (simulados por contêineres Docker) colaboram no treinamento de um **autoencoder convolucional**
+2. O autoencoder comprime imagens MNIST de **784 pixels → 32 valores** no espaço latente (redução de ~96%)
+3. O vetor latente é transmitido ao receptor, que **reconstrói a imagem completa** a partir dessa representação compacta
+4. Um mecanismo de **injeção de caos** (`tc netem`) simula condições adversas de rede para testar robustez
 
-### 🏗️ Arquitetura
+### Principais Funcionalidades
 
-O sistema roda inteiramente em **Docker** e consiste em 5 containers:
+- **Compressão Semântica**: Envie apenas 4% dos dados e reconstrua a imagem no destino
+- **Completação de Imagens**: Envie apenas parte da imagem e o modelo completa o restante
+- **Treinamento Federado**: Clientes treinam localmente e compartilham apenas os pesos do modelo (nunca os dados)
+- **Compressão Top-K**: O cliente instável envia apenas 40% dos pesos (60% de esparsidade)
+- **Injeção de Caos**: Controle em tempo real de perda de pacotes, latência, corrupção e duplicação
+- **Dashboard Interativo**: Painel Streamlit com visualização, testes e métricas
 
-1.  **🧠 Server (Flask):** O "Cérebro". Recebe pesos, reconstrói dados faltantes (Inpainting/GenIA) e agrega o modelo global (FedAvg).
-2.  **🔵 Client Full:** Cliente com conexão perfeita. Treina e envia os pesos completos.
-3.  **🟠 Client Noisy:** Cliente com conexão ruim (simulada). Aplica compressão semântica (envia apenas 50% dos dados) para economizar banda.
-4.  **📉 Chaos Injector:** Container privilegiado que injeta falhas reais de rede (Packet Loss, Delay) na interface do *Client Noisy* usando `tc` (Traffic Control).
-5.  **🛰️ Dashboard (Streamlit):** Painel de controle para monitorar logs, métricas em tempo real e interagir com a IA.
+---
+
+## 🏗️ Arquitetura
+
+O sistema é composto por **5 contêineres** Docker orquestrados via Docker Compose:
+
+| Contêiner | Função |
+|---|---|
+| **🧠 fl-server** | Servidor Flask — agregação FedAvg, endpoints `/reconstruct` e `/complete` |
+| **🔵 client-full** | Cliente estável — treina e envia pesos completos |
+| **🟠 client-noisy** | Cliente instável — aplica compressão Top-K (60% esparsidade) |
+| **📊 dashboard** | Painel Streamlit — visualização, testes de comunicação e controle de caos |
+| **💥 chaos-injector** | Alpine + `tc netem` — injeta falhas de rede no cliente instável |
+
+```
+┌─────────────┐     HTTP/REST      ┌─────────────┐
+│ client-full │ ◄────────────────► │  fl-server  │
+│  (estável)  │   pesos completos  │  (FedAvg)   │
+└─────────────┘                    └──────┬──────┘
+                                          │
+┌─────────────┐     HTTP/REST      ┌──────┴──────┐
+│client-noisy │ ◄────────────────► │  fl-server  │
+│ (instável)  │   pesos Top-K      │             │
+└──────┬──────┘                    └─────────────┘
+       │ network_mode
+┌──────┴──────┐                    ┌─────────────┐
+│   chaos-    │                    │  dashboard  │
+│  injector   │                    │ (Streamlit) │
+│ (tc netem)  │                    │  :8501      │
+└─────────────┘                    └─────────────┘
+```
+
+---
 
 ## 🚀 Como Rodar
 
 ### Pré-requisitos
-* Docker e Docker Compose instalados.
+
+- [Docker](https://www.docker.com/) e Docker Compose instalados
 
 ### Passo a Passo
 
-1.  **Clone o repositório:**
-    ```bash
-    git clone [https://github.com/SEU_USUARIO/federated-genia-demo.git](https://github.com/SEU_USUARIO/federated-genia-demo.git)
-    cd federated-genia-demo
-    ```
+```bash
+# 1. Clone o repositório
+git clone https://github.com/SEU_USUARIO/federeted-semantic.git
+cd federeted-semantic
 
-2.  **Inicie o ambiente:**
-    ```bash
-    docker-compose up --build
-    ```
+# 2. Construa e inicie todos os contêineres
+cd docker
+docker compose up --build -d
 
-3.  **Acesse o Dashboard:**
-    Abra seu navegador em: **[http://localhost:8501](http://localhost:8501)**
+# 3. Acesse o dashboard
+# Abra no navegador: http://localhost:8501
+```
 
-## 🕹️ Como Usar (Workflow)
+### Comandos Úteis
 
-O sistema inicia em modo **PAUSED** para evitar treino com dataset vazio.
+```bash
+# Ver logs em tempo real
+docker compose logs -f
 
-1.  **Ensinar (Teacher Forcing):**
-    * No Dashboard, vá na barra lateral "📚 Ensinar a IA".
-    * Digite uma frase correta (Ex: `Federated`) e clique em **Salvar**.
-    * *Adicione algumas variações para melhorar o treino.*
+# Parar tudo
+docker compose down
 
-2.  **Treinar:**
-    * Clique no botão **▶️ INICIAR** na barra lateral.
-    * Acompanhe os terminais:
-        * Os clientes vão baixar o Dataset, treinar localmente e enviar ao servidor.
-        * O servidor vai agregar e salvar o `global_model.pth`.
-    * Veja o gráfico de **Loss** caindo (o aprendizado acontecendo).
+# Reconstruir após alterações no código
+docker compose up --build -d
+```
 
-3.  **Testar (Correção Semântica):**
-    * Clique em **⏸️ PAUSAR**.
-    * Vá na área "🧪 Teste de Correção".
-    * Digite uma palavra com erro (Ex: `Federeted`).
-    * Clique em **Verificar**.
-    * A IA tentará reconstruir a palavra baseada no que aprendeu (Esperado: `Federated`).
+---
 
-## 🛠️ Tecnologias Utilizadas
+## 🕹️ Como Usar
 
-* **Linguagem:** Python 3.9
-* **Machine Learning:** PyTorch (Autoencoder Semântico)
-* **Comunicação:** API REST (Flask)
-* **Monitoramento:** Streamlit + SQLite
-* **Infraestrutura:** Docker & Docker Compose
-* **Rede:** `iproute2` (Traffic Control) para injeção de falhas.
+### 1. Iniciar o Treinamento
 
-## 📂 Estrutura de Arquivos
+- Acesse **http://localhost:8501**
+- Clique em **▶️ INICIAR** na barra lateral
+- Os clientes começam a treinar automaticamente com o dataset MNIST
+- Acompanhe a evolução na aba **📊 Métricas**
 
-```text
-federated-genia-demo/
+### 2. Testar a Comunicação Semântica
+
+Na aba **📡 Comunicação**:
+- Clique em **🎲 Gerar Nova Imagem**
+- Veja lado a lado: imagem original → vetor latente (32 valores) → reconstrução
+- Métricas MSE e PSNR são exibidas automaticamente
+
+### 3. Testar Completação de Imagens
+
+Na aba **🧩 Completação**:
+- Escolha o tipo de máscara (metade inferior, pixels aleatórios, metade direita)
+- Ajuste a porcentagem de mascaramento (10% a 90%)
+- O modelo tenta reconstruir a imagem completa a partir da parte enviada
+
+### 4. Injetar Caos de Rede
+
+Na barra lateral, seção **🔥 Controle de Caos**:
+- **Perda de Pacotes** (0–5%)
+- **Latência** (0–2000 ms)
+- **Corrupção** (0–2%)
+- **Duplicação** (0–5%)
+- Clique em **⚡ Aplicar Caos** — as condições afetam apenas o cliente instável
+
+---
+
+## 🧠 Modelo: Autoencoder Convolucional
+
+```
+Encoder                              Decoder
+───────                              ───────
+Input (1×28×28)                      Latent (32)
+    ↓ Conv2d(1→32) + ReLU                ↓ Linear(32→256)
+    ↓ MaxPool(2×2)                       ↓ Linear(256→3136)
+    ↓ Conv2d(32→64) + ReLU              ↓ Reshape(64×7×7)
+    ↓ MaxPool(2×2)                       ↓ ConvTranspose2d(64→32) + ReLU
+    ↓ Flatten(3136)                      ↓ ConvTranspose2d(32→1) + Sigmoid
+    ↓ Linear(3136→256)              Output (1×28×28)
+    ↓ Linear(256→32)
+Latent (32)
+```
+
+| Métrica | Valor |
+|---|---|
+| Entrada | 784 pixels (28×28) |
+| Espaço latente | 32 dimensões |
+| Compressão | ~96% (784 → 32) |
+| Fator | 24.5× |
+| Loss | MSE (Mean Squared Error) |
+| Otimizador | Adam (lr=0.001) |
+
+---
+
+## 🛠️ Tecnologias
+
+| Categoria | Tecnologia |
+|---|---|
+| ML Framework | PyTorch 2.x |
+| Dataset | MNIST (60k train / 10k test) |
+| Servidor | Flask (API REST) |
+| Dashboard | Streamlit |
+| Métricas | SQLite |
+| Infraestrutura | Docker + Docker Compose |
+| Caos de Rede | `tc netem` (iproute2) |
+
+---
+
+## 📂 Estrutura do Projeto
+
+```
+federeted-semantic/
 ├── docker/
-│   ├── docker-compose.yml        # 🐳 Orquestração dos 5 containers
-│   ├── Dockerfile                # 🐳 Imagem base Python (ML + API + Dashboard)
-│   └── requirements.txt          # 📦 Dependências (Torch, Flask, Streamlit)
+│   ├── docker-compose.yml    # Orquestração dos 5 contêineres
+│   ├── Dockerfile            # Imagem base (Python 3.9 + PyTorch)
+│   └── requirements.txt      # Dependências Python
 │
 ├── src/
-│   ├── core/                     # 🧠 Núcleo de ML e Federated Learning
-│   │   ├── model_utils.py        # Arquitetura do Autoencoder Semântico (PyTorch)
-│   │   ├── fedavg.py             # Algoritmo de agregação Federada (FedAvg)
-│   │   ├── compression.py        # Compressão semântica (drop / latent / mask)
-│   │   └── text_utils.py         # Conversão Texto ↔ Tensor
-│   │
-│   ├── server/                   # 🧠 Servidor Central (Agregador)
-│   │   ├── server.py             # API Flask (upload, download, reconstrução)
-│   │   └── state.py              # Controle de ciclos, status e sincronização
-│   │
-│   ├── client/                   # 🟠🔵 Clientes Federados
-│   │   ├── client.py             # Lógica de treino local + envio de parâmetros
-│   │   └── node_config.py        # Configuração (Full / Noisy / Compressão)
-│   │
-│   ├── dashboard/                # 🛰️ Painel de Observabilidade
-│   │   ├── dashboard.py          # Interface Streamlit
-│   │   └── charts.py             # Gráficos (loss, banda, latência)
-│   │
-│   ├── chaos/                    # 📉 Injeção de falhas de rede
-│   │   └── chaos_injector.sh     # Script tc (delay, loss, bandwidth)
-│   │
-│   ├── storage/                  # 💾 Artefatos gerados (runtime)
-│   │   ├── dataset.txt           # Frases ensinadas pelo usuário
-│   │   ├── global_model.pth      # Modelo global agregado
-│   │   ├── metrics.db            # Banco SQLite de métricas
-│   │   └── status.json           # Estado do sistema (RUNNING / PAUSED)
-│   │
-│   └── logs/                     # 📜 Logs de execução (gerado)
+│   ├── model_utils.py        # Autoencoder Convolucional (encoder + decoder)
+│   ├── image_utils.py        # Carregamento MNIST, mascaramento, métricas
+│   ├── server.py             # Servidor Flask (FedAvg + /reconstruct + /complete)
+│   ├── client.py             # Cliente FL (treino local + upload de pesos)
+│   ├── main.py               # Entry point (roteia para server ou client)
+│   ├── dashboard.py          # Painel Streamlit (4 abas)
+│   ├── chaos_loop.sh         # Loop de injeção de caos (tc netem)
+│   ├── chaos_config.txt      # Configuração de caos (runtime)
+│   └── logs/                 # Logs de execução dos contêineres
 │
-├── .gitignore                    # Arquivos ignorados pelo Git
-├── README.md                     # 📘 Documentação do projeto
-└── LICENSE                       # (Opcional) Licença do projeto
+├── paper/
+│   ├── main.tex              # Artigo LaTeX (IEEEtran, português)
+│   ├── ref.bib               # Referências bibliográficas
+│   └── acronym.tex           # Lista de acrônimos
+│
+├── .gitignore
+└── README.md
+```
+
+---
+
+## 📄 Artigo Científico
+
+O diretório `paper/` contém o artigo em formato IEEE (LaTeX) documentando o sistema. Para compilar:
+
+```bash
+cd paper
+pdflatex main.tex
+bibtex main
+pdflatex main.tex
+pdflatex main.tex
+```
+
+---
+
+## 📜 Licença
+
+Este projeto é parte de uma iniciação científica.
 ```
 
 ## ⚠️ Troubleshooting
