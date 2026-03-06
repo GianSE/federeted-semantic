@@ -21,13 +21,16 @@ import matplotlib.pyplot as plt
 # Imports do projeto
 # ============================================================
 try:
-    from model_utils import ImageAutoencoder
+    from model_utils import ImageAutoencoder, get_model
     from image_utils import (load_mnist, get_random_batch,
                              mask_image_bottom, mask_image_random,
-                             mask_image_right, compute_mse, compute_psnr)
+                             mask_image_right, compute_mse, compute_psnr, compute_ssim)
+    from config import MODEL_TYPE, LATENT_DIM
     IMPORTS_OK = True
 except ImportError as e:
     IMPORTS_OK = False
+    MODEL_TYPE = "autoencoder"
+    LATENT_DIM = 32
 
 # ============================================================
 # Estilo CSS
@@ -161,7 +164,7 @@ if st.sidebar.button("🗑️ Limpar Histórico (Reset DB)"):
             os.remove(DB_FILE)
         conn = sqlite3.connect(DB_FILE)
         conn.execute("CREATE TABLE IF NOT EXISTS training_logs (timestamp TEXT, node_id TEXT, bytes_sent INTEGER, loss REAL, round_number INTEGER)")
-        conn.execute("CREATE TABLE IF NOT EXISTS round_metrics (round_number INTEGER, global_mse REAL, global_psnr REAL, timestamp TEXT, chaos_scenario TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS round_metrics (round_number INTEGER, global_mse REAL, global_psnr REAL, timestamp TEXT, chaos_scenario TEXT, global_ssim REAL)")
         conn.commit(); conn.close()
         st.sidebar.success("Histórico resetado!")
         time.sleep(1); st.rerun()
@@ -292,7 +295,7 @@ with tab2:
         if comm_mode == "Imagem única" and st.button("🎲 Gerar Nova Imagem", key="comm_btn"):
             if os.path.exists("global_model.pth"):
                 try:
-                    model = ImageAutoencoder()
+                    model = get_model(MODEL_TYPE, LATENT_DIM)
                     model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
                     model.eval()
 
@@ -302,8 +305,13 @@ with tab2:
                     original = original.unsqueeze(0)
 
                     with torch.no_grad():
-                        latent = model.encode(original)
-                        reconstructed = model.decode(latent)
+                        if MODEL_TYPE == "vae":
+                            mu, _ = model.encode(original)
+                            latent = mu
+                            reconstructed = model.decode(mu)
+                        else:
+                            latent = model.encode(original)
+                            reconstructed = model.decode(latent)
 
                     col1, col2, col3 = st.columns(3)
                     with col1:
@@ -321,7 +329,8 @@ with tab2:
                         st.image(reconstructed.squeeze().numpy(), width=200, clamp=True)
                         mse = compute_mse(original, reconstructed)
                         psnr = compute_psnr(original, reconstructed)
-                        st.caption(f"MSE: {mse:.6f} | PSNR: {psnr:.1f} dB")
+                        ssim = compute_ssim(original, reconstructed)
+                        st.caption(f"MSE: {mse:.6f} | PSNR: {psnr:.1f} dB | SSIM: {ssim:.4f}")
 
                     st.success(f"📡 Compressão: 784 → 32 valores = **{784/32:.0f}x** de redução ({(1-32/784)*100:.1f}%)")
                 except Exception as e:
@@ -332,7 +341,7 @@ with tab2:
         elif comm_mode == "Todos os 10 dígitos" and st.button("🔟 Testar Todos os Dígitos", key="all_digits_btn"):
             if os.path.exists("global_model.pth"):
                 try:
-                    model = ImageAutoencoder()
+                    model = get_model(MODEL_TYPE, LATENT_DIM)
                     model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
                     model.eval()
                     
@@ -345,20 +354,23 @@ with tab2:
                         if len(digit_examples) == 10:
                             break
                     
-                    # Create 2x10 grid: originals on top, reconstructions below
                     fig, axes = plt.subplots(2, 10, figsize=(16, 4))
                     total_mse = 0
                     total_psnr = 0
+                    total_ssim = 0
                     
                     for d in range(10):
                         img = digit_examples[d].unsqueeze(0)
                         with torch.no_grad():
-                            recon = model(img)
+                            output = model(img)
+                            recon = output[0] if isinstance(output, tuple) else output
                         
                         mse = compute_mse(img, recon)
                         psnr = compute_psnr(img, recon)
+                        ssim = compute_ssim(img, recon)
                         total_mse += mse
                         total_psnr += psnr
+                        total_ssim += ssim
                         
                         axes[0, d].imshow(img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
                         axes[0, d].set_title(f"{d}", fontsize=12, fontweight='bold')
@@ -374,7 +386,7 @@ with tab2:
                     st.pyplot(fig)
                     plt.close(fig)
                     
-                    st.success(f"📊 Média: MSE={total_mse/10:.4f} | PSNR={total_psnr/10:.1f} dB | Compressão: 24.5×")
+                    st.success(f"📊 Média: MSE={total_mse/10:.4f} | PSNR={total_psnr/10:.1f} dB | SSIM={total_ssim/10:.4f} | Compressão: 24.5×")
                 except Exception as e:
                     st.error(f"Erro: {e}")
             else:
@@ -398,7 +410,7 @@ with tab3:
     elif st.button("🧩 Testar Completação", key="comp_btn"):
         if os.path.exists("global_model.pth"):
             try:
-                model = ImageAutoencoder()
+                model = get_model(MODEL_TYPE, LATENT_DIM)
                 model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
                 model.eval()
 
@@ -415,7 +427,8 @@ with tab3:
                     masked = mask_image_right(original, mask_pct)
 
                 with torch.no_grad():
-                    completed = model(masked)
+                    output = model(masked)
+                    completed = output[0] if isinstance(output, tuple) else output
 
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -433,7 +446,8 @@ with tab3:
                     st.image(completed.squeeze().numpy(), width=200, clamp=True)
                     mse = compute_mse(original, completed)
                     psnr = compute_psnr(original, completed)
-                    st.caption(f"MSE: {mse:.6f} | PSNR: {psnr:.1f} dB")
+                    ssim = compute_ssim(original, completed)
+                    st.caption(f"MSE: {mse:.6f} | PSNR: {psnr:.1f} dB | SSIM: {ssim:.4f}")
 
                 info_sent = (1 - mask_pct) * 100
                 st.info(f"📡 Enviado apenas **{info_sent:.0f}%** da imagem. Modelo completou os **{mask_pct*100:.0f}%** faltantes.")
@@ -492,10 +506,10 @@ with tab5:
                 conn.close()
                 return
             
-            # Round metrics (global MSE/PSNR)
+            # Round metrics (global MSE/PSNR/SSIM)
             try:
                 df_rounds = pd.read_sql(
-                    "SELECT round_number, global_mse, global_psnr FROM round_metrics ORDER BY round_number ASC",
+                    "SELECT round_number, global_mse, global_psnr, global_ssim FROM round_metrics ORDER BY round_number ASC",
                     conn
                 )
             except Exception:
@@ -537,13 +551,17 @@ with tab5:
             # Global model quality
             if not df_rounds.empty:
                 st.subheader("🌐 Qualidade do Modelo Global")
-                g1, g2 = st.columns(2)
+                g1, g2, g3 = st.columns(3)
                 with g1:
                     st.metric("MSE Global (última)", f"{df_rounds['global_mse'].iloc[-1]:.6f}")
                     st.line_chart(df_rounds.set_index('round_number')['global_mse'], height=250)
                 with g2:
                     st.metric("PSNR Global (última)", f"{df_rounds['global_psnr'].iloc[-1]:.1f} dB")
                     st.line_chart(df_rounds.set_index('round_number')['global_psnr'], height=250)
+                with g3:
+                    if 'global_ssim' in df_rounds.columns:
+                        st.metric("SSIM Global (última)", f"{df_rounds['global_ssim'].iloc[-1]:.4f}")
+                        st.line_chart(df_rounds.set_index('round_number')['global_ssim'], height=250)
 
         except Exception as e:
             st.error(f"Erro: {e}")

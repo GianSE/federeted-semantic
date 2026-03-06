@@ -3,6 +3,10 @@ import os
 # === Modelo ===
 LATENT_DIM = 32
 MODEL_TYPE = os.environ.get("MODEL_TYPE", "autoencoder")  # "autoencoder" ou "vae"
+VAE_BETA = float(os.environ.get("VAE_BETA", "1.0"))  # Peso da KL divergence (β-VAE)
+
+# === Canal AWGN ===
+CHANNEL_SNR_DB = os.environ.get("CHANNEL_SNR_DB", "")  # "" = sem canal; ex: "20" para 20 dB
 
 # === Treinamento Federado ===
 BATCH_SIZE = 32

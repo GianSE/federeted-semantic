@@ -79,14 +79,15 @@ def load_round_metrics_csv(scenario):
     path = os.path.join(RESULTS_DIR, f"{scenario}_round_metrics.csv")
     if not os.path.exists(path):
         return None
-    rounds, mses, psnrs = [], [], []
+    rounds, mses, psnrs, ssims = [], [], [], []
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
             rounds.append(int(row["round_number"]))
             mses.append(float(row["global_mse"]))
             psnrs.append(float(row["global_psnr"]))
-    return {"rounds": rounds, "mses": mses, "psnrs": psnrs}
+            ssims.append(float(row.get("global_ssim", 0)))
+    return {"rounds": rounds, "mses": mses, "psnrs": psnrs, "ssims": ssims}
 
 
 def load_from_db():
@@ -176,8 +177,9 @@ def generate_fig_reconstruction():
     print("📊 Gerando fig_reconstruction.png...")
     
     try:
-        from model_utils import ImageAutoencoder
-        from image_utils import load_mnist, compute_mse, compute_psnr
+        from model_utils import get_model
+        from image_utils import load_mnist, compute_mse, compute_psnr, compute_ssim
+        from config import MODEL_TYPE, LATENT_DIM
     except ImportError:
         print("  ⚠️ Imports falham. Pulando.")
         return
@@ -186,7 +188,7 @@ def generate_fig_reconstruction():
         print("  ⚠️ global_model.pth não encontrado. Pulando.")
         return
     
-    model = ImageAutoencoder()
+    model = get_model(MODEL_TYPE, LATENT_DIM)
     model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
     model.eval()
     
@@ -212,7 +214,8 @@ def generate_fig_reconstruction():
     for d in selected_digits:
         img = digit_examples[d].unsqueeze(0)
         with torch.no_grad():
-            recon = model(img)
+            output = model(img)
+            recon = output[0] if isinstance(output, tuple) else output
         originals.append(img.squeeze().numpy())
         reconstructions.append(recon.squeeze().numpy())
         labels.append(d)
@@ -246,8 +249,8 @@ def generate_fig_reconstruction():
 
 
 def generate_tab_reconstruction(model, dataset):
-    """Tabela LaTeX: MSE e PSNR para cada dígito"""
-    from image_utils import compute_mse, compute_psnr
+    """Tabela LaTeX: MSE, PSNR e SSIM para cada dígito"""
+    from image_utils import compute_mse, compute_psnr, compute_ssim
     
     digit_examples = {}
     for i in range(len(dataset)):
@@ -261,26 +264,28 @@ def generate_tab_reconstruction(model, dataset):
     for d in range(10):
         img = digit_examples[d].unsqueeze(0)
         with torch.no_grad():
-            recon = model(img)
+            output = model(img)
+            recon = output[0] if isinstance(output, tuple) else output
         mse = compute_mse(img, recon)
         psnr = compute_psnr(img, recon)
-        rows.append((d, mse, psnr, "24.5$\\times$"))
+        ssim = compute_ssim(img, recon)
+        rows.append((d, mse, psnr, ssim, "24.5$\\times$"))
     
-    # Average
     avg_mse = np.mean([r[1] for r in rows])
     avg_psnr = np.mean([r[2] for r in rows])
+    avg_ssim = np.mean([r[3] for r in rows])
     
     tex = "\\begin{table}[htbp]\n\\centering\n"
     tex += "\\caption{Métricas de reconstrução semântica por dígito.}\n"
     tex += "\\label{tab:reconstruction}\n"
-    tex += "\\begin{tabular}{cccc}\n\\hline\n"
-    tex += "\\textbf{Dígito} & \\textbf{MSE} & \\textbf{PSNR (dB)} & \\textbf{Compressão} \\\\\n\\hline\n"
+    tex += "\\begin{tabular}{ccccc}\n\\hline\n"
+    tex += "\\textbf{Dígito} & \\textbf{MSE} & \\textbf{PSNR (dB)} & \\textbf{SSIM} & \\textbf{Compressão} \\\\\n\\hline\n"
     
-    for d, mse, psnr, comp in rows:
-        tex += f"{d} & {mse:.4f} & {psnr:.1f} & {comp} \\\\\n"
+    for d, mse, psnr, ssim, comp in rows:
+        tex += f"{d} & {mse:.4f} & {psnr:.1f} & {ssim:.4f} & {comp} \\\\\n"
     
     tex += "\\hline\n"
-    tex += f"\\textbf{{Média}} & \\textbf{{{avg_mse:.4f}}} & \\textbf{{{avg_psnr:.1f}}} & 24.5$\\times$ \\\\\n"
+    tex += f"\\textbf{{Média}} & \\textbf{{{avg_mse:.4f}}} & \\textbf{{{avg_psnr:.1f}}} & \\textbf{{{avg_ssim:.4f}}} & 24.5$\\times$ \\\\\n"
     tex += "\\hline\n\\end{tabular}\n\\end{table}\n"
     
     path = os.path.join(TABLES_DIR, "tab_reconstruction.tex")
@@ -296,9 +301,10 @@ def generate_fig_completion():
     print("📊 Gerando fig_completion.png...")
     
     try:
-        from model_utils import ImageAutoencoder
+        from model_utils import get_model
         from image_utils import (load_mnist, mask_image_bottom, mask_image_random,
-                                 mask_image_right, compute_mse, compute_psnr)
+                                 mask_image_right, compute_mse, compute_psnr, compute_ssim)
+        from config import MODEL_TYPE, LATENT_DIM
     except ImportError:
         print("  ⚠️ Imports falham. Pulando.")
         return
@@ -307,7 +313,7 @@ def generate_fig_completion():
         print("  ⚠️ global_model.pth não encontrado. Pulando.")
         return
     
-    model = ImageAutoencoder()
+    model = get_model(MODEL_TYPE, LATENT_DIM)
     model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
     model.eval()
     
@@ -329,7 +335,8 @@ def generate_fig_completion():
     for row_idx, (title, mask_fn, pct) in enumerate(configs):
         masked = mask_fn(original, pct)
         with torch.no_grad():
-            completed = model(masked)
+            output = model(masked)
+            completed = output[0] if isinstance(output, tuple) else output
         
         mse = compute_mse(original, completed)
         psnr = compute_psnr(original, completed)
@@ -364,7 +371,7 @@ def generate_fig_completion():
 def generate_tab_completion(model, original):
     """Tabela LaTeX: completação por tipo de máscara e porcentagem"""
     from image_utils import (mask_image_bottom, mask_image_random,
-                             mask_image_right, compute_mse, compute_psnr)
+                             mask_image_right, compute_mse, compute_psnr, compute_ssim)
     
     mask_types = [
         ("Metade Inferior", mask_image_bottom),
@@ -376,17 +383,19 @@ def generate_tab_completion(model, original):
     tex = "\\begin{table}[htbp]\n\\centering\n"
     tex += "\\caption{Qualidade de completação por tipo e nível de mascaramento.}\n"
     tex += "\\label{tab:completion}\n"
-    tex += "\\begin{tabular}{lccc}\n\\hline\n"
-    tex += "\\textbf{Tipo de Máscara} & \\textbf{\\% Mascarado} & \\textbf{MSE} & \\textbf{PSNR (dB)} \\\\\n\\hline\n"
+    tex += "\\begin{tabular}{lcccc}\n\\hline\n"
+    tex += "\\textbf{Tipo de Máscara} & \\textbf{\\% Mascarado} & \\textbf{MSE} & \\textbf{PSNR (dB)} & \\textbf{SSIM} \\\\\n\\hline\n"
     
     for name, fn in mask_types:
         for pct in percentages:
             masked = fn(original, pct)
             with torch.no_grad():
-                completed = model(masked)
+                output = model(masked)
+                completed = output[0] if isinstance(output, tuple) else output
             mse = compute_mse(original, completed)
             psnr = compute_psnr(original, completed)
-            tex += f"{name} & {int(pct*100)}\\% & {mse:.4f} & {psnr:.1f} \\\\\n"
+            ssim = compute_ssim(original, completed)
+            tex += f"{name} & {int(pct*100)}\\% & {mse:.4f} & {psnr:.1f} & {ssim:.4f} \\\\\n"
         tex += "\\hline\n"
     
     tex += "\\end{tabular}\n\\end{table}\n"
@@ -455,8 +464,10 @@ def generate_tab_chaos():
     tex = "\\begin{table}[htbp]\n\\centering\n"
     tex += "\\caption{Resultados comparativos por cenário de injeção de caos.}\n"
     tex += "\\label{tab:chaos_results}\n"
-    tex += "\\begin{tabular}{lccccc}\n\\hline\n"
-    tex += "\\textbf{Cenário} & \\textbf{MSE Final} & \\textbf{PSNR Final (dB)} & \\textbf{Rodadas} & \\textbf{Melhor MSE} & \\textbf{Melhor PSNR (dB)} \\\\\n\\hline\n"
+    tex += "\\small\n"
+    tex += "\\begin{tabular}{lcccccc}\n\\hline\n"
+    tex += "\\textbf{Cenário} & \\textbf{MSE} & \\textbf{PSNR} & \\textbf{SSIM} & \\textbf{Rod.} & \\textbf{Melhor} & \\textbf{Melhor} \\\\\n"
+    tex += " & \\textbf{Final} & \\textbf{(dB)} & \\textbf{Final} & & \\textbf{MSE} & \\textbf{PSNR (dB)} \\\\\n\\hline\n"
     
     for scenario in SCENARIOS:
         round_data = load_round_metrics_csv(scenario)
@@ -465,11 +476,12 @@ def generate_tab_chaos():
         
         final_mse = round_data["mses"][-1] if round_data["mses"] else 0
         final_psnr = round_data["psnrs"][-1] if round_data["psnrs"] else 0
+        final_ssim = round_data["ssims"][-1] if round_data.get("ssims") else 0
         best_mse = min(round_data["mses"]) if round_data["mses"] else 0
         best_psnr = max(round_data["psnrs"]) if round_data["psnrs"] else 0
         total_rounds = len(round_data["rounds"])
         
-        tex += f"{scenario} & {final_mse:.4f} & {final_psnr:.1f} & {total_rounds} & {best_mse:.4f} & {best_psnr:.1f} \\\\\n"
+        tex += f"{scenario} & {final_mse:.4f} & {final_psnr:.1f} & {final_ssim:.4f} & {total_rounds} & {best_mse:.4f} & {best_psnr:.1f} \\\\\n"
     
     tex += "\\hline\n\\end{tabular}\n\\end{table}\n"
     

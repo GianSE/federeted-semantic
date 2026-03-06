@@ -5,14 +5,14 @@ import sqlite3
 import json
 from server import app as flask_app
 from client import train_and_upload
-from model_utils import ImageAutoencoder
+from model_utils import get_model
 from image_utils import load_mnist, load_mnist_filtered, get_random_batch
-from config import NONIID_LABELS
+from config import NONIID_LABELS, MODEL_TYPE, LATENT_DIM, VAE_BETA, CHANNEL_SNR_DB
 
 def init_db():
     conn = sqlite3.connect('metrics.db', check_same_thread=False)
     conn.execute("CREATE TABLE IF NOT EXISTS training_logs (timestamp TEXT, node_id TEXT, bytes_sent INTEGER, loss REAL, round_number INTEGER)")
-    conn.execute("CREATE TABLE IF NOT EXISTS round_metrics (round_number INTEGER, global_mse REAL, global_psnr REAL, timestamp TEXT, chaos_scenario TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS round_metrics (round_number INTEGER, global_mse REAL, global_psnr REAL, timestamp TEXT, chaos_scenario TEXT, global_ssim REAL)")
     conn.commit(); conn.close()
     print("✅ DB Pronto!")
 
@@ -29,16 +29,22 @@ if __name__ == "__main__":
 
     if mode == 'server':
         print("🚀 Servidor FL Iniciado...")
+        print(f"   Modelo: {MODEL_TYPE.upper()} | Latente: {LATENT_DIM}d")
         with open("status.json", "w") as f: json.dump({"status": "PAUSED"}, f)
         init_db()
         flask_app.run(host='0.0.0.0', port=5000)
     else:
         print(f"🤖 [{node_id}] Cliente de Imagens Iniciado.")
         
-        # Carrega o autoencoder
-        model = ImageAutoencoder()
+        # Carrega o modelo (AE ou VAE)
+        model = get_model(MODEL_TYPE, LATENT_DIM)
         total_params = sum(p.numel() for p in model.parameters())
-        print(f"[{node_id}] Autoencoder carregado: {total_params:,} parâmetros.")
+        print(f"[{node_id}] {MODEL_TYPE.upper()} carregado: {total_params:,} parâmetros.")
+        
+        # Parse canal SNR
+        channel_snr = float(CHANNEL_SNR_DB) if CHANNEL_SNR_DB else None
+        if channel_snr is not None:
+            print(f"[{node_id}] Canal AWGN ativo: SNR={channel_snr} dB")
         
         # Carrega MNIST (Non-IID para client-noniid)
         if "noniid" in node_id:
@@ -69,7 +75,9 @@ if __name__ == "__main__":
                 images, labels = get_random_batch(dataset, batch_size=32)
                 
                 # Treina e envia pesos
-                train_and_upload(model, images, server_url, node_id)
+                train_and_upload(model, images, server_url, node_id,
+                                model_type=MODEL_TYPE, vae_beta=VAE_BETA,
+                                channel_snr_db=channel_snr)
                 
             except Exception as e:
                 print(f"❌ {e}", flush=True)

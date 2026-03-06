@@ -49,31 +49,44 @@ def compress_weights_top_k(weight_dict, compression_ratio=0.5):
         
     return compressed_payload
 
-def train_and_upload(model, images, server_url, node_id):
-    """Treina o autoencoder de imagens localmente e envia pesos ao servidor"""
+def train_and_upload(model, images, server_url, node_id, model_type="autoencoder", vae_beta=1.0, channel_snr_db=None):
+    """Treina o modelo (AE ou VAE) localmente e envia pesos ao servidor"""
     try:
         model_before = copy.deepcopy(model)
         
         optimizer = optim.Adam(model.parameters(), lr=0.001)
-        criterion = nn.MSELoss()  # Reconstrução de imagens
+        criterion = nn.MSELoss()
         model.train()
 
         # --- TREINO LOCAL ---
-        log_terminal(f"🔥 Treinando Autoencoder ({images.shape[0]} imagens)...", node_id)
+        is_vae = model_type == "vae"
+        tag = "VAE" if is_vae else "Autoencoder"
+        log_terminal(f"🔥 Treinando {tag} ({images.shape[0]} imagens)...", node_id)
         epochs = 5
         final_loss = 0
         
         for epoch in range(epochs):
             optimizer.zero_grad()
-            reconstructed = model(images)
-            loss = criterion(reconstructed, images)  # Autoencoder: entrada = saída desejada
+            if is_vae:
+                from model_utils import ImageVAE
+                reconstructed, mu, logvar = model(images, snr_db=channel_snr_db)
+                recon_loss = criterion(reconstructed, images)
+                kl_loss = ImageVAE.kl_divergence(mu, logvar)
+                loss = recon_loss + vae_beta * kl_loss
+            else:
+                reconstructed = model(images, snr_db=channel_snr_db)
+                loss = criterion(reconstructed, images)
             loss.backward()
             optimizer.step()
             final_loss = loss.item()
 
         # Info de compressão semântica
         with torch.no_grad():
-            z = model.encode(images)
+            if is_vae:
+                mu, _ = model.encode(images)
+                z = mu
+            else:
+                z = model.encode(images)
             pixels = images.numel()
             latent_size = z.numel()
             compression = pixels / latent_size

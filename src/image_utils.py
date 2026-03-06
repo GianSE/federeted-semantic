@@ -85,3 +85,37 @@ def compute_psnr(original, reconstructed, max_val=1.0):
     if mse == 0:
         return float('inf')
     return 10 * np.log10(max_val ** 2 / mse)
+
+def compute_ssim(original, reconstructed, window_size=7):
+    """
+    Calcula o SSIM (Structural Similarity Index) entre dois tensores.
+    Implementação simplificada para imagens em escala de cinza.
+    Retorna valor entre -1 e 1 (1 = idênticas).
+    """
+    C1 = (0.01) ** 2
+    C2 = (0.03) ** 2
+    
+    # Garante formato correto
+    if original.dim() == 4:
+        img1 = original.squeeze(0).squeeze(0)
+        img2 = reconstructed.squeeze(0).squeeze(0)
+    elif original.dim() == 3:
+        img1 = original.squeeze(0)
+        img2 = reconstructed.squeeze(0)
+    else:
+        img1 = original
+        img2 = reconstructed
+    
+    img1 = img1.float()
+    img2 = img2.float()
+    
+    mu1 = img1.mean()
+    mu2 = img2.mean()
+    sigma1_sq = ((img1 - mu1) ** 2).mean()
+    sigma2_sq = ((img2 - mu2) ** 2).mean()
+    sigma12 = ((img1 - mu1) * (img2 - mu2)).mean()
+    
+    numerator = (2 * mu1 * mu2 + C1) * (2 * sigma12 + C2)
+    denominator = (mu1 ** 2 + mu2 ** 2 + C1) * (sigma1_sq + sigma2_sq + C2)
+    
+    return (numerator / denominator).item()

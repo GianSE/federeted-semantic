@@ -6,7 +6,7 @@ import os
 import json
 import time
 from datetime import datetime
-from config import REQUIRED_CLIENTS, CHAOS_SCENARIO, TEST_BATCH_SIZE, ROUND_TIMEOUT
+from config import REQUIRED_CLIENTS, CHAOS_SCENARIO, TEST_BATCH_SIZE, ROUND_TIMEOUT, MODEL_TYPE, LATENT_DIM
 
 app = Flask(__name__)
 
@@ -97,12 +97,12 @@ def upload_weights():
         return jsonify({"error": str(e)}), 500
 
 def evaluate_global_model():
-    """Avalia o modelo global em imagens de teste e retorna MSE e PSNR"""
+    """Avalia o modelo global em imagens de teste e retorna MSE, PSNR e SSIM"""
     try:
-        from model_utils import ImageAutoencoder
-        from image_utils import load_mnist, get_random_batch, compute_mse, compute_psnr
+        from model_utils import get_model
+        from image_utils import load_mnist, get_random_batch, compute_mse, compute_psnr, compute_ssim
         
-        model = ImageAutoencoder()
+        model = get_model(MODEL_TYPE, LATENT_DIM)
         model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
         model.eval()
         
@@ -110,14 +110,19 @@ def evaluate_global_model():
         images, _ = get_random_batch(dataset, batch_size=TEST_BATCH_SIZE)
         
         with torch.no_grad():
-            reconstructed = model(images)
+            output = model(images)
+            if isinstance(output, tuple):  # VAE retorna (recon, mu, logvar)
+                reconstructed = output[0]
+            else:
+                reconstructed = output
         
         mse = compute_mse(images, reconstructed)
         psnr = compute_psnr(images, reconstructed)
-        return mse, psnr
+        ssim = compute_ssim(images, reconstructed)
+        return mse, psnr, ssim
     except Exception as e:
         log_terminal(f"⚠️ Erro na avaliação: {e}")
-        return None, None
+        return None, None, None
 
 def aggregate_weights():
     """FedAvg: média dos pesos de todos os clientes"""
@@ -139,10 +144,10 @@ def aggregate_weights():
         log_terminal(f"💾 Modelo Global salvo! [Rodada {current_round}]")
         
         # Avaliação do modelo global
-        mse, psnr = evaluate_global_model()
+        mse, psnr, ssim = evaluate_global_model()
         if mse is not None:
-            log_terminal(f"📊 Avaliação Global: MSE={mse:.6f} | PSNR={psnr:.1f} dB")
-            log_round_metrics(current_round, mse, psnr)
+            log_terminal(f"📊 Avaliação Global: MSE={mse:.6f} | PSNR={psnr:.1f} dB | SSIM={ssim:.4f}")
+            log_round_metrics(current_round, mse, psnr, ssim)
         
         round_buffer.clear()
         log_terminal(f"🏁 Rodada {current_round} finalizada. Buffer limpo.\n")
@@ -158,12 +163,12 @@ def reconstruct_image():
     Simula: Dispositivo A envia representação comprimida → Dispositivo B reconstrói.
     """
     try:
-        from model_utils import ImageAutoencoder
+        from model_utils import get_model
         
         data = request.json
         latent = torch.tensor(data['latent'], dtype=torch.float32).unsqueeze(0)
         
-        model = ImageAutoencoder()
+        model = get_model(MODEL_TYPE, LATENT_DIM)
         if os.path.exists("global_model.pth"):
             model.load_state_dict(torch.load("global_model.pth", map_location="cpu"))
         model.eval()
@@ -186,7 +191,7 @@ def complete_image():
     Simula: envio de pedaços da imagem, modelo completa o restante.
     """
     try:
-        from model_utils import ImageAutoencoder
+        from model_utils import get_model
         
         data = request.json
         partial = torch.tensor(data['image'], dtype=torch.float32)
@@ -195,13 +200,17 @@ def complete_image():
         elif partial.dim() == 3:
             partial = partial.unsqueeze(0)
         
-        model = ImageAutoencoder()
+        model = get_model(MODEL_TYPE, LATENT_DIM)
         if os.path.exists("global_model.pth"):
             model.load_state_dict(torch.load("global_model.pth", map_location="cpu"))
         model.eval()
         
         with torch.no_grad():
-            recon = model(partial)  # Encode parcial → Decode completo
+            output = model(partial)
+            if isinstance(output, tuple):
+                recon = output[0]
+            else:
+                recon = output
         
         return jsonify({
             "status": "ok",
@@ -231,14 +240,14 @@ def log_to_db(node_id, bytes_sent, loss, round_number):
     except Exception as e:
         log_terminal(f"⚠️ Erro ao salvar no DB: {e}")
 
-def log_round_metrics(round_number, global_mse, global_psnr):
+def log_round_metrics(round_number, global_mse, global_psnr, global_ssim=None):
     try:
         conn = sqlite3.connect('metrics.db', timeout=10)
         cursor = conn.cursor()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         scenario = os.environ.get("CHAOS_SCENARIO", CHAOS_SCENARIO)
-        cursor.execute("INSERT INTO round_metrics VALUES (?, ?, ?, ?, ?)",
-                     (round_number, global_mse, global_psnr, timestamp, scenario))
+        cursor.execute("INSERT INTO round_metrics VALUES (?, ?, ?, ?, ?, ?)",
+                     (round_number, global_mse, global_psnr, timestamp, scenario, global_ssim or 0.0))
         conn.commit()
         conn.close()
     except Exception as e:
