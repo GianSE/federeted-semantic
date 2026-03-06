@@ -59,6 +59,11 @@ src/data/
 src/chaos_config.txt
 
 # ===========================
+# Resultados de Experimentos (runtime)
+# ===========================
+src/results/
+
+# ===========================
 # LaTeX (arquivos de compilação)
 # ===========================
 paper/*.aux
