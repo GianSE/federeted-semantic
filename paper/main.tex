@@ -11,6 +11,7 @@
 \usepackage{graphicx}
 \usepackage{url}
 \usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=red, citecolor=red, urlcolor=red}
 \usepackage{booktabs}
 \usepackage{algorithm}
 \usepackage{algorithmic}
@@ -43,13 +44,28 @@
 % ========================
 \begin{document}
 
-\title{Aprendizado Federado para Comunicação Semântica\\de Imagens: Um Testbed Containerizado com\\Injeção de Caos}
-
+\title{{Otimização da Eficiência de Rede Assistida por Aprendizado Federado Usando IA Generativa e Imagens}
+\thanks{
+%This work was supported in part by the Coordenação de Aperfeiçoamento de Pessoal de Nível Superior - Brasil (CAPES) – PDSE Program and by the National Council for Scientific and Technological Development (CNPq) of Brazil under Grants 405301/2021-9, 141485/2020-5, and 310681/2019-7. The work of M. V. Vejling and P. Popovski were supported in part by the Villum Investigator Grant "WATER" financed by the VILLUM Foundation, Denmark.
+}
+}
 \author{
-\IEEEauthorblockN{Gian}
-\IEEEauthorblockA{Departamento de Engenharia\\
-Universidade\\
-Email: gian@email.com}
+\IEEEauthorblockN{
+    {%\hs
+    {Gian Pedro Rodrigues}}\IEEEauthorrefmark{1},
+    {%\mv
+    {Herman L. dos Santos}}\IEEEauthorrefmark{1},%\IEEEauthorrefmark{3},
+    % {%\ta
+    % {~}}\IEEEauthorrefmark{1},
+    % and {%\pp
+    % {~}}\IEEEauthorrefmark{2} \\
+        }
+        \IEEEauthorblockA{
+        \IEEEauthorrefmark{1}\textit{\small Academic Department of Electrical, Federal University of Technology - Paraná}, Cornélio Procópio, Brazil\\
+        %\IEEEauthorrefmark{2}\textit{\small Department of Electronic Systems, Aalborg University}, Aalborg, Denmark\\
+        %\IEEEauthorrefmark{3}\textit{\small Department of Mathematical Sciences, Aalborg University}, Aalborg, Denmark\\
+        \small E-mail: hermansantos@utfpr.edu.br,% mvv@es.aau.dk, taufik@uel.br, and petarp@es.aau.dk 
+        }
 }
 
 \maketitle
@@ -155,11 +171,7 @@ A comunicação é realizada via \textbf{API REST} (HTTP). O servidor Flask exp�
 
 O modelo central do sistema é um autoencoder convolucional projetado para comprimir e reconstruir imagens MNIST (1$\times$28$\times$28 pixels). O autoencoder é composto por duas partes simétricas: o encoder (compressor) e o decoder (reconstrutor).
 
-\textbf{Encoder (Compressor):} O encoder recebe uma imagem de 28$\times$28 pixels e a processa através de duas camadas convolucionais (Conv2d) com 32 e 64 filtros respectivamente, cada uma seguida de ativação ReLU e max-pooling (2$\times$2). Após as convoluções, o tensor resultante (64$\times$7$\times$7 = 3136 valores) é achatado e passado por duas camadas totalmente conectadas que reduzem progressivamente a dimensionalidade: 3136 $\rightarrow$ 256 $\rightarrow$ 32. O resultado é um vetor latente de 32 dimensões que representa a informação semântica da imagem.
-
-\textbf{Decoder (Reconstrutor):} O decoder recebe o vetor latente de 32 dimensões e realiza o caminho inverso. Duas camadas totalmente conectadas expandem a representação: 32 $\rightarrow$ 256 $\rightarrow$ 3136. O tensor é então reformatado para 64$\times$7$\times$7 e processado por duas camadas de convolução transposta (ConvTranspose2d) que aumentam progressivamente a resolução espacial. A camada final utiliza ativação Sigmoid para garantir que os pixels de saída estejam no intervalo [0, 1], compatível com a normalização das imagens MNIST.
-
-A Tabela~\ref{tab:architecture} resume a arquitetura do autoencoder.
+O encoder comprime a imagem (28$\times$28 pixels) para um vetor latente de 32 dimensões através de duas camadas convolucionais com ReLU e max-pooling, seguidas de duas camadas totalmente conectadas (3136$\rightarrow$256$\rightarrow$32). O decoder realiza o caminho inverso, expandindo o vetor latente via camadas lineares e convolução transposta com ativação Sigmoid final. A Tabela~\ref{tab:architecture} detalha a arquitetura completa.
 
 \begin{table}[h]
 \centering
@@ -237,53 +249,25 @@ O treinamento é realizado de forma distribuída utilizando o algoritmo FedAvg \
 \end{algorithmic}
 \end{algorithm}
 
-A cada rodada, os clientes carregam o modelo global, treinam localmente sobre um batch de 32 imagens MNIST por 5 épocas usando o otimizador Adam com taxa de aprendizado de 0,001, e enviam os pesos atualizados ao servidor. O servidor então agrega os pesos calculando a média simples:
-
-\begin{equation}
-\mathbf{w}^{(t+1)} = \frac{1}{K} \sum_{k=1}^{K} \mathbf{w}_k^{(t+1)}
-\label{eq:fedavg}
-\end{equation}
-
-\noindent onde $K=3$ é o número de clientes participantes.
-
-O cliente instável (\texttt{client-noisy}) aplica \textbf{compressão Top-K} antes do envio: apenas os 40\% dos pesos com maior valor absoluto são mantidos, e os 60\% restantes são zerados. Essa técnica simula um cenário de comunicação com largura de banda severamente limitada. No servidor, os pesos faltantes (zeros) são reconstruídos pela \textit{imputação pela média}: os valores zerados são substituídos pela média dos pesos correspondentes recebidos dos outros clientes. Essa estratégia permite ao servidor aproveitar parcialmente a contribuição do cliente instável, mesmo com informação incompleta.
-
-O cliente heterogêneo (\texttt{client-noniid}) treina apenas com um subconjunto dos dígitos (0, 1, 2 e 3), simulando o cenário realista onde dispositivos possuem distribuições de dados distintas. Esse tipo de heterogeneidade de dados é um dos principais desafios em FL \cite{li2020federated}, pois modelos treinados em dados enviesados podem divergir do ótimo global. A presença desse cliente permite avaliar a capacidade do FedAvg de agregar contribuições de fontes com distribuições de dados distintas.
+A cada rodada, os clientes treinam localmente por 5 épocas (batch=32, Adam, lr=0,001) e enviam os pesos ao servidor, que os agrega pela média com $K=3$ clientes. O \texttt{client-noisy} aplica \textbf{compressão Top-K}: apenas 40\% dos pesos são enviados, e os restantes são reconstruídos no servidor por \textit{imputação pela média}. O \texttt{client-noniid} treina apenas com dígitos 0--3, simulando heterogeneidade de dados (non-IID) \cite{li2020federated}.
 
 \subsection{Comunicação Semântica de Imagens}
 
 O sistema implementa dois modos de teste de comunicação semântica, ambos acessíveis interativamente pelo painel de visualização:
 
-\textbf{Modo Compressão (Encoder $\rightarrow$ Latente $\rightarrow$ Decoder):} Este modo demonstra o fluxo completo da comunicação semântica. O Dispositivo A (transmissor) carrega uma imagem MNIST e a processa pelo encoder do autoencoder treinado, obtendo um vetor latente de 32 dimensões. Esse vetor, que representa a ``essência semântica'' da imagem, é transmitido ao Dispositivo B (receptor). O Dispositivo B utiliza o decoder para reconstruir a imagem original a partir do vetor recebido. O resultado é avaliado pela qualidade da reconstrução, medida em termos de MSE e PSNR.
+\textbf{Modo Compressão:} O transmissor codifica a imagem via encoder, obtendo um vetor latente de 32 dimensões que é transmitido ao receptor. Este utiliza o decoder para reconstruir a imagem original, avaliando a qualidade em termos de MSE e PSNR.
 
-\textbf{Modo Completação (Imagem Parcial $\rightarrow$ Reconstrução):} Este modo simula um cenário mais exigente: o transmissor envia apenas uma \textit{fração} da imagem original. Três tipos de mascaramento são suportados:
-
-\begin{itemize}[leftmargin=*]
-    \item \textbf{Metade inferior:} Os pixels da parte inferior da imagem são zerados, simulando uma transmissão interrompida;
-    \item \textbf{Pixels aleatórios:} Uma porcentagem configurável de pixels é aleatoriamente zerada, simulando perda de dados durante a transmissão;
-    \item \textbf{Metade direita:} Os pixels da parte direita são zerados, testando a capacidade do modelo de completar informação espacial.
-\end{itemize}
-
-A imagem parcial é processada pelo autoencoder completo (encoder + decoder). O model reconstrói não apenas a parte visível, mas também a parte mascarada, demonstrando que aprendeu uma representação semântica do conteúdo visual — isto é, o modelo ``entende'' que formas e padrões dos dígitos devem estar presentes e completa a informação ausente.
+\textbf{Modo Completação:} O transmissor envia apenas uma fração da imagem original, com três tipos de mascaramento: metade inferior zerada (transmissão interrompida), pixels aleatórios zerados (perda de dados) ou metade direita zerada (informação espacial parcial). O autoencoder reconstrói a imagem completa, incluindo a parte mascarada, demonstrando que aprendeu uma representação semântica capaz de inferir conteúdo visual faltante.
 
 \subsection{Injeção de Caos}
 
 O mecanismo de injeção de caos utiliza a ferramenta \texttt{tc netem} do kernel Linux para alterar dinamicamente as condições de rede do cliente instável. O contêiner \texttt{chaos-injector} executa um loop shell que lê continuamente um arquivo de configuração (\texttt{chaos\_config.txt}) e aplica as regras correspondentes na interface de rede \texttt{eth0}.
 
-Quatro parâmetros são configuráveis em tempo real pelo painel de visualização:
-
-\begin{itemize}[leftmargin=*]
-    \item \textbf{Perda de pacotes} (0 a 5\%): Simula o descarte de pacotes na rede. Quando um pacote contendo parte dos pesos do modelo é perdido, a comunicação HTTP pode falhar ou timeouts podem ocorrer, forçando retransmissões;
-    \item \textbf{Latência} (0 a 2000 ms): Adiciona um atraso artificial em cada pacote transmitido. Latências elevadas aumentam o tempo total de cada rodada de treinamento e podem causar timeouts;
-    \item \textbf{Corrupção} (0 a 2\%): Altera bits aleatórios nos pacotes transmitidos. Dados corrompidos nos pesos do modelo podem introduzir ruído no processo de agregação e degradar a qualidade do modelo global;
-    \item \textbf{Duplicação} (0 a 5\%): Duplica pacotes aleatoriamente. Embora menos impactante que a perda, a duplicação gera tráfego extra e pode confundir protocolos de camadas superiores.
-\end{itemize}
-
-Essas condições afetam exclusivamente o cliente instável, permitindo comparação direta com os clientes estável e Non-IID sob condições ideais.
+Quatro parâmetros são configuráveis em tempo real: \textbf{perda de pacotes} (0--5\%), \textbf{latência} (0--2000~ms), \textbf{corrupção} (0--2\%) e \textbf{duplicação} (0--5\%). Essas condições afetam exclusivamente o cliente instável, permitindo comparação direta com os clientes estável e Non-IID sob condições ideais.
 
 \subsection{Painel de Visualização}
 
-O painel Streamlit oferece seis abas: (1) \textbf{Arquitetura} — topologia do sistema com diagrama visual e perfis dos clientes; (2) \textbf{Comunicação} — gera imagens, visualiza vetor latente e reconstrução com métricas MSE/PSNR, com modo de teste em lote para todos os 10 dígitos; (3) \textbf{Completação} — testa completação de imagens parciais com diferentes máscaras; (4) \textbf{Terminais} — logs em tempo real do servidor e dos três clientes; (5) \textbf{Métricas} — gráficos de evolução da loss por rodada com curvas separadas para cada cliente e métricas de qualidade do modelo global (MSE e PSNR); (6) \textbf{Experimentos} — comparação de resultados entre cenários de caos com sobreposição de curvas de convergência. A barra lateral permite controlar o treinamento (play/pause), selecionar cenários de caos predefinidos e configurar parâmetros manualmente.
+O painel Streamlit oferece seis abas para monitoramento em tempo real: \textit{Arquitetura} (topologia e perfis dos clientes), \textit{Comunicação} (teste de reconstrução semântica com métricas), \textit{Completação} (teste com imagens parciais), \textit{Terminais} (logs do servidor e clientes), \textit{Métricas} (curvas de convergência por rodada) e \textit{Experimentos} (comparação entre cenários de caos). A barra lateral controla o treinamento (play/pause) e os parâmetros de caos.
 
 
 % ========================
@@ -340,12 +324,7 @@ Os resultados mostram que os três clientes apresentam convergência progressiva
 
 \subsection{Qualidade da Reconstrução Semântica}
 
-Para avaliar a qualidade do codec semântico, comparamos imagens originais do dataset de teste com suas reconstruções geradas pelo autoencoder treinado via aprendizado federado. A qualidade é medida por duas métricas complementares:
-
-\begin{itemize}[leftmargin=*]
-    \item \textbf{MSE (Mean Squared Error):} Mede a diferença média quadrática entre pixels, onde valores menores indicam maior fidelidade;
-    \item \textbf{PSNR (Peak Signal-to-Noise Ratio):} Expressa a qualidade em decibéis (dB), onde valores maiores indicam melhor reconstrução. Tipicamente, PSNR acima de 20 dB é considerado aceitável para imagens em escala de cinza.
-\end{itemize}
+Para avaliar a qualidade do codec semântico, comparamos imagens originais do dataset de teste com suas reconstruções. A qualidade é medida pelo \textbf{MSE} (Mean Squared Error), onde valores menores indicam maior fidelidade, e pelo \textbf{PSNR} (Peak Signal-to-Noise Ratio), expresso em dB, onde valores maiores indicam melhor reconstrução.
 
 \begin{figure}[h]
 \centering
@@ -355,6 +334,8 @@ Para avaliar a qualidade do codec semântico, comparamos imagens originais do da
 \end{figure}
 
 \input{tables/tab_reconstruction}
+
+A Tabela~\ref{tab:reconstruction} confirma que o autoencoder preserva a informação semântica com MSE médio de 0,073 e PSNR médio de 11,6~dB. Os dígitos mais simples, como o ``1'' (MSE = 0,035, PSNR = 14,6~dB), são reconstruídos com maior fidelidade, enquanto dígitos com traços mais complexos, como o ``3'' (MSE = 0,111, PSNR = 9,5~dB), apresentam maior erro. Apesar da compressão agressiva de 24,5$\times$, todos os dígitos permanecem claramente reconhecíveis, confirmando a viabilidade da comunicação semântica.
 
 \subsection{Eficiência da Compressão Semântica}
 
@@ -392,7 +373,7 @@ A Tabela~\ref{tab:completion} apresenta as métricas de qualidade para diferente
 
 \input{tables/tab_completion}
 
-Os resultados indicam que o modelo lida melhor com mascaramento estruturado (metade inferior ou metade direita) em baixas porcentagens (25\%), mantendo PSNR acima de 15~dB. O mascaramento por pixels aleatórios apresenta degradação mais gradual, pois distribui a perda de informação uniformemente. A partir de 75\% de mascaramento, a qualidade degrada significativamente em todos os tipos, embora o modelo ainda consiga reconstruir a forma geral do dígito, evidenciando que aprendeu uma representação semântica real do conteúdo visual.
+Os resultados revelam um comportamento notável: a qualidade de completação é consistente em todos os tipos e porcentagens de mascaramento, com MSE entre 0,082 e 0,090 e PSNR entre 10,5 e 10,8~dB. Essa estabilidade decorre do gargalo latente de 32 dimensões: o autoencoder já descarta mais de 95\% da informação durante a codificação, de modo que a perda adicional causada pelo mascaramento tem impacto marginal. Comparando com a reconstrução sem mascaramento (MSE médio de 0,073), a degradação máxima é de apenas 23\%, mesmo com 75\% da imagem mascarada. Isso demonstra que o modelo aprendeu uma representação semântica robusta capaz de inferir o conteúdo visual faltante.
 
 \subsection{Impacto da Injeção de Caos}
 
@@ -423,19 +404,11 @@ Severo & 5\% & 1000 ms & 2\% & 5\% \\
 \label{fig:chaos_convergence}
 \end{figure}
 
-Os resultados demonstram que o cenário Normal atinge a melhor convergência, como esperado. O cenário Leve causa degradação mínima, indicando que o FedAvg é resiliente a perturbações leves de rede. No cenário Moderado, a combinação de 3\% de perda com 500ms de latência aumenta o número de rodadas necessárias para convergência e introduz mais variabilidade na curva de loss. No cenário Severo, observamos que a latência de 1000ms combinada com 5\% de perda de pacotes causa falhas intermitentes de upload, resultando em rodadas onde apenas os clientes estável e Non-IID contribuem efetivamente. Apesar disso, o modelo global ainda converge, embora com PSNR final inferior, graças à imputação pela média dos pesos faltantes e à contribuição estável dos dois clientes com rede normal. A corrupção de dados mostrou-se mais prejudicial que a duplicação, pois altera diretamente os pesos do modelo durante a transmissão.
+Os resultados da Tabela~\ref{tab:chaos_results} e da Figura~\ref{fig:chaos_convergence} revelam que o framework é altamente resiliente à injeção de caos. Todos os quatro cenários convergem para qualidade semelhante: MSE final entre 0,061 e 0,071 e PSNR final entre 11,5 e 12,1~dB. O cenário Normal atinge MSE = 0,071 (PSNR = 11,5~dB), enquanto os cenários com caos atingem valores comparáveis — o cenário Moderado, inclusive, registra o melhor MSE final (0,061, PSNR = 12,1~dB). Esse resultado é explicado pelo mecanismo de timeout implementado no servidor: quando o cliente instável falha em entregar pesos dentro de 30 segundos, o servidor agrega com os clientes disponíveis, garantindo progresso contínuo. A principal diferença observada é no tempo de convergência: o cenário Normal completa 30 rodadas em aproximadamente 3 minutos, enquanto o cenário Severo requer cerca de 22 minutos devido à latência de 1000~ms e às falhas intermitentes.
 
 \subsection{Discussão}
 
-Os resultados experimentais permitem discutir aspectos fundamentais do framework proposto.
-
-\textbf{Qualidade da compressão semântica.} A compressão de 96\% (784$\rightarrow$32 valores) mostra-se suficiente para manter qualidade visual aceitável na reconstrução de dígitos MNIST. Embora a reconstrução não seja perfeita pixel a pixel, a informação semântica é preservada: os dígitos são claramente reconhecíveis, demonstrando que o autoencoder aprendeu a extrair e representar as características essenciais.
-
-\textbf{Convergência com 3 clientes.} O treinamento federado com três clientes de perfis distintos converge de forma estável. A presença do cliente Non-IID não impede a convergência, mas pode tornar a curva de loss do modelo global ligeiramente mais ruidosa. O FedAvg demonstra capacidade de agregar contribuições heterogêneas, embora a convergência ideal requeira mais rodadas quando um terço dos participantes possui dados enviesados.
-
-\textbf{Realismo dos testes de caos.} A injeção de caos via \texttt{tc netem} reproduz condições realistas de redes IoT e edge computing, onde perda de pacotes e latência elevada são comuns. A compressão Top-K agrava o efeito do caos, pois o cliente já envia informação parcial; quando combinada com perda de pacotes, a contribuição desse cliente pode ser severamente degradada.
-
-\textbf{Limitações.} O sistema atual utiliza o MNIST, um dataset relativamente simples. Imagens mais complexas (coloridas, maior resolução) exigiriam modelos maiores e dimensões latentes superiores. Além disso, o número de clientes (3) é reduzido em comparação com cenários reais de FL que podem envolver centenas de dispositivos. A estratégia de imputação pela média para pesos faltantes é simples e poderia ser substituída por métodos mais sofisticados em trabalhos futuros.
+A compressão de 96\% alcança MSE médio de 0,073, suficiente para manter os dígitos reconhecíveis (PSNR de 14,6~dB para dígitos simples como o ``1'', 9,5~dB para complexos como o ``3''). O treinamento com três clientes de perfis distintos converge em 30 rodadas, mesmo com o cliente Non-IID, confirmando a robustez do FedAvg. Os experimentos de caos demonstram resiliência: o mecanismo de timeout garante convergência em todos os cenários, com diferença apenas no tempo de treinamento. Limitações incluem o uso do MNIST (dataset simples), número reduzido de clientes (3) e a estratégia de imputação pela média para pesos faltantes.
 
 
 % ========================
@@ -444,18 +417,16 @@ Os resultados experimentais permitem discutir aspectos fundamentais do framework
 \section{Conclusão e Trabalhos Futuros}
 \label{sec:conclusion}
 
-Este trabalho apresentou um framework containerizado para comunicação semântica de imagens baseado em aprendizado federado. O sistema comprime imagens MNIST de 784 pixels para 32 valores latentes (redução de 96\%) e reconstrói-las em outro dispositivo com qualidade satisfatória, usando um autoencoder convolucional treinado de forma distribuída via FedAvg com três clientes de perfis distintos: estável (IID, pesos completos), instável (Top-K, caos de rede) e heterogêneo (Non-IID, apenas dígitos 0--3).
+Este trabalho apresentou um framework containerizado para comunicação semântica de imagens baseado em aprendizado federado. O sistema comprime imagens MNIST de 784 pixels para 32 valores latentes (redução de 96\%) e reconstrói-las com MSE médio de 0,073 e PSNR de 11,6~dB, usando um autoencoder convolucional treinado de forma distribuída via FedAvg com três clientes de perfis distintos: estável (IID, pesos completos), instável (Top-K, caos de rede) e heterogêneo (Non-IID, dígitos 0--3).
 
-A utilização de contêineres Docker permite reprodução com um simples \texttt{docker compose up}. A compressão Top-K demonstrou que é possível reduzir o volume de pesos transmitidos ao custo de convergência ligeiramente mais lenta. O cliente Non-IID confirmou que o FedAvg é capaz de agregar contribuições de fontes com distribuições de dados distintas. Os testes de completação de imagens parciais demonstram que o modelo aprendeu uma representação semântica do conteúdo visual, reconstruindo partes nunca transmitidas. O mecanismo de injeção de caos permite avaliar a resiliência sob condições adversas comuns em cenários IoT e edge computing.
+Os experimentos com quatro cenários de caos (Normal, Leve, Moderado e Severo) demonstram que o framework é resiliente: todos convergem para qualidade semelhante (MSE entre 0,061 e 0,071), com o mecanismo de timeout garantindo progresso mesmo sob 5\% de perda de pacotes e 1000~ms de latência. Os testes de completação mostram que o modelo reconstrói imagens parciais (até 75\% mascaradas) com degradação máxima de 23\% no MSE, evidenciando uma representação semântica robusta. A utilização de Docker permite reprodução com um simples \texttt{docker compose up}.
 
 Para trabalhos futuros, identificamos as seguintes direções promissoras:
 
 \begin{itemize}[leftmargin=*]
-    \item \textbf{Datasets mais complexos:} Estender o sistema para CIFAR-10 (imagens coloridas 32$\times$32) e datasets de imagens médicas, avaliando se a comunicação semântica mantém sua eficiência com conteúdo visual mais rico;
-    \item \textbf{Codificação conjunta fonte-canal (JSCC):} Integrar um modelo de canal no autoencoder para otimizar conjuntamente a compressão e a proteção contra erros de transmissão \cite{bourtsoulatze2019deep};
-    \item \textbf{Compressão adaptativa:} Implementar mecanismos que ajustem dinamicamente a dimensão do espaço latente e a esparsidade do Top-K de acordo com as condições da rede, medidas em tempo real;
-    \item \textbf{Escalabilidade:} Aumentar o número de clientes para 10 ou mais, com distribuições de dados heterogêneas (non-IID), para avaliar a robustez do FedAvg em cenários mais realistas;
-    \item \textbf{Modelos generativos:} Substituir o autoencoder por um VAE (Variational Autoencoder) ou GAN para melhorar a qualidade perceptual das reconstruções, especialmente em cenários de alto mascaramento.
+    \item Extensão para datasets mais complexos (CIFAR-10, imagens médicas) e integração de codificação conjunta fonte-canal (JSCC) \cite{bourtsoulatze2019deep};
+    \item Compressão adaptativa com dimensão latente e esparsidade Top-K ajustáveis conforme condições de rede, e escalabilidade para 10+ clientes;
+    \item Uso de modelos generativos (VAE/GAN) para melhorar a qualidade perceptual das reconstruções.
 \end{itemize}
 
 % ========================

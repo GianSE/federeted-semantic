@@ -1,17 +1,15 @@
-% Tabela gerada automaticamente por generate_figures.py
-% Execute: python generate_figures.py para atualizar com dados reais
 \begin{table}[htbp]
 \centering
-\caption{Impacto dos cenários de caos nas métricas de convergência.}
-\label{tab:chaos}
-\begin{tabular}{ccccc}
+\caption{Resultados comparativos por cenário de injeção de caos.}
+\label{tab:chaos_results}
+\begin{tabular}{lccccc}
 \hline
-\textbf{Cenário} & \textbf{MSE Final} & \textbf{PSNR Final (dB)} & \textbf{Rounds até Convergência} & \textbf{Degradação (\%)} \\
+\textbf{Cenário} & \textbf{MSE Final} & \textbf{PSNR Final (dB)} & \textbf{Rodadas} & \textbf{Melhor MSE} & \textbf{Melhor PSNR (dB)} \\
 \hline
-Normal & --- & --- & --- & --- \\
-Leve & --- & --- & --- & --- \\
-Moderado & --- & --- & --- & --- \\
-Severo & --- & --- & --- & --- \\
+Normal & 0.0708 & 11.5 & 22 & 0.0681 & 11.7 \\
+Leve & 0.0712 & 11.5 & 30 & 0.0639 & 11.9 \\
+Moderado & 0.0613 & 12.1 & 30 & 0.0613 & 12.1 \\
+Severo & 0.0684 & 11.6 & 30 & 0.0610 & 12.1 \\
 \hline
 \end{tabular}
 \end{table}

@@ -15,6 +15,8 @@ import time
 import json
 import sqlite3
 import csv
+import shutil
+import requests
 from datetime import datetime
 
 CHAOS_SCENARIOS = {
@@ -30,6 +32,7 @@ DB_FILE = "metrics.db"
 RESULTS_DIR = "results"
 TARGET_ROUNDS = int(os.environ.get("EXPERIMENT_ROUNDS", "30"))
 POLL_INTERVAL = 3  # seconds
+SERVER_URL = os.environ.get("SERVER_URL", "http://fl-server:5000")
 
 
 def set_status(s):
@@ -98,6 +101,15 @@ def remove_global_model():
         os.remove("global_model.pth")
 
 
+def reset_server():
+    """Reseta o round counter do servidor via API"""
+    try:
+        requests.post(f"{SERVER_URL}/reset_round", timeout=5)
+        print("  🔄 Servidor resetado.")
+    except Exception:
+        print("  ⚠️ Não foi possível resetar servidor (pode não estar acessível).")
+
+
 def wait_for_rounds(target):
     print(f"  ⏳ Aguardando {target} rodadas...")
     start = time.time()
@@ -126,6 +138,7 @@ def run_scenario(scenario_name):
     time.sleep(2)
     reset_db()
     remove_global_model()
+    reset_server()
 
     # 2. Aplicar cenário de caos
     apply_chaos(scenario_name)
@@ -145,6 +158,13 @@ def run_scenario(scenario_name):
 
     # 6. Exportar resultados
     export_results(scenario_name)
+
+    # 7. Salvar modelo deste cenário
+    if os.path.exists("global_model.pth"):
+        model_path = os.path.join(RESULTS_DIR, f"{scenario_name}_model.pth")
+        shutil.copy("global_model.pth", model_path)
+        print(f"  💾 Modelo salvo: {model_path}")
+
     print(f"  ✅ Cenário {scenario_name} concluído!")
 
 
@@ -160,9 +180,15 @@ def main():
     for scenario in CHAOS_SCENARIOS:
         run_scenario(scenario)
 
-    # Restaurar estado normal
+    # Restaurar estado normal e melhor modelo
     apply_chaos("Normal")
     set_status("PAUSED")
+
+    # Restaurar modelo do cenário Normal (melhor qualidade)
+    normal_model = os.path.join(RESULTS_DIR, "Normal_model.pth")
+    if os.path.exists(normal_model):
+        shutil.copy(normal_model, "global_model.pth")
+        print("\n💾 Modelo Normal restaurado como global_model.pth")
 
     total_time = time.time() - start_time
     mins = int(total_time // 60)

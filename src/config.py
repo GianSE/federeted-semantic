@@ -28,6 +28,7 @@ CHAOS_SCENARIO = os.environ.get("CHAOS_SCENARIO", "Normal")
 # === Experimentos ===
 EXPERIMENT_ROUNDS = int(os.environ.get("EXPERIMENT_ROUNDS", "30"))
 TEST_BATCH_SIZE = 100  # Imagens de teste para avaliação do modelo global
+ROUND_TIMEOUT = int(os.environ.get("ROUND_TIMEOUT", "30"))  # Segundos para agregar com clientes disponíveis
 
 # === Servidor ===
 MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50 MB max payload

@@ -4,14 +4,16 @@ import numpy as np
 import sqlite3
 import os
 import json
+import time
 from datetime import datetime
-from config import REQUIRED_CLIENTS, CHAOS_SCENARIO, TEST_BATCH_SIZE
+from config import REQUIRED_CLIENTS, CHAOS_SCENARIO, TEST_BATCH_SIZE, ROUND_TIMEOUT
 
 app = Flask(__name__)
 
 # Buffer de pesos: dicionário garante apenas o último envio de cada cliente
 round_buffer = {}
 current_round = 0
+round_start_time = None
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -57,6 +59,7 @@ def reconstruct_weights(partial_weights, node_id):
 
 @app.route('/upload_weights', methods=['POST'])
 def upload_weights():
+    global round_start_time
     try:
         data = request.json
         node_id = data.get('node_id', 'unknown')
@@ -67,12 +70,25 @@ def upload_weights():
         else:
             log_terminal(f"📥 Recebido de: {node_id} | Aguardando parceiros... ({len(round_buffer)+1}/{REQUIRED_CLIENTS})")
 
+        # Marca início da rodada quando primeiro cliente chega
+        if not round_buffer:
+            round_start_time = time.time()
+
         full_weights_reconstructed = reconstruct_weights(data['weights'], node_id)
         round_buffer[node_id] = full_weights_reconstructed
         
         log_to_db(node_id, len(str(data['weights'])), loss, current_round)
         
-        if len(round_buffer) >= REQUIRED_CLIENTS:
+        # Agrega se todos chegaram OU se timeout expirou com pelo menos 1 cliente
+        should_aggregate = len(round_buffer) >= REQUIRED_CLIENTS
+        if not should_aggregate and round_start_time and len(round_buffer) >= 1:
+            elapsed = time.time() - round_start_time
+            if elapsed > ROUND_TIMEOUT:
+                log_terminal(f"⏱️ Timeout ({elapsed:.0f}s) com {len(round_buffer)}/{REQUIRED_CLIENTS} clientes. Agregando parcial.")
+                should_aggregate = True
+
+        if should_aggregate:
+            round_start_time = None
             aggregate_weights()
             
         return jsonify({"status": "accepted", "round": current_round}), 200
@@ -193,6 +209,15 @@ def complete_image():
         }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/reset_round', methods=['POST'])
+def reset_round():
+    global round_buffer, current_round, round_start_time
+    round_buffer = {}
+    current_round = 0
+    round_start_time = None
+    log_terminal("🔄 Round counter e buffer resetados.")
+    return jsonify({"status": "reset", "round": 0}), 200
 
 def log_to_db(node_id, bytes_sent, loss, round_number):
     try:

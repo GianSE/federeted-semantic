@@ -96,6 +96,24 @@ services:
     depends_on:
       - client-noisy
 
+  # ============================
+  # Runner (experimentos e geração de figuras)
+  # ============================
+  runner:
+    image: fl-app-image:latest
+    container_name: fl_runner
+    volumes:
+      - ../src:/app
+      - ../paper:/paper
+    environment:
+      - FIGURES_DIR=/paper/figures
+      - TABLES_DIR=/paper/tables
+      - SERVER_URL=http://fl-server:5000
+    networks:
+      - fl-network
+    profiles:
+      - tools
+
 networks:
   fl-network:
     driver: bridge

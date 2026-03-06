@@ -29,8 +29,8 @@ from matplotlib.gridspec import GridSpec
 # Config
 # ============================================================
 RESULTS_DIR = "results"
-FIGURES_DIR = os.path.join("..", "paper", "figures")
-TABLES_DIR = os.path.join("..", "paper", "tables")
+FIGURES_DIR = os.environ.get("FIGURES_DIR", os.path.join("..", "paper", "figures"))
+TABLES_DIR = os.environ.get("TABLES_DIR", os.path.join("..", "paper", "tables"))
 DB_FILE = "metrics.db"
 
 SCENARIOS = ["Normal", "Leve", "Moderado", "Severo"]

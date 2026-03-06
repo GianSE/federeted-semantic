@@ -1,19 +1,22 @@
-% Tabela gerada automaticamente por generate_figures.py
-% Execute: python generate_figures.py para atualizar com dados reais
 \begin{table}[htbp]
 \centering
-\caption{Métricas de completação de imagem por tipo e porcentagem de máscara.}
+\caption{Qualidade de completação por tipo e nível de mascaramento.}
 \label{tab:completion}
-\begin{tabular}{cccc}
+\begin{tabular}{lccc}
 \hline
-\textbf{Tipo de Máscara} & \textbf{Porcentagem} & \textbf{MSE} & \textbf{PSNR (dB)} \\
+\textbf{Tipo de Máscara} & \textbf{\% Mascarado} & \textbf{MSE} & \textbf{PSNR (dB)} \\
 \hline
-Aleatória & 25\% & --- & --- \\
-Aleatória & 50\% & --- & --- \\
-Aleatória & 75\% & --- & --- \\
-Quadrada & 25\% & --- & --- \\
-Quadrada & 50\% & --- & --- \\
-Quadrada & 75\% & --- & --- \\
+Metade Inferior & 25\% & 0.0863 & 10.6 \\
+Metade Inferior & 50\% & 0.0848 & 10.7 \\
+Metade Inferior & 75\% & 0.0832 & 10.8 \\
+\hline
+Pixels Aleatórios & 25\% & 0.0898 & 10.5 \\
+Pixels Aleatórios & 50\% & 0.0897 & 10.5 \\
+Pixels Aleatórios & 75\% & 0.0887 & 10.5 \\
+\hline
+Metade Direita & 25\% & 0.0865 & 10.6 \\
+Metade Direita & 50\% & 0.0858 & 10.7 \\
+Metade Direita & 75\% & 0.0823 & 10.8 \\
 \hline
 \end{tabular}
 \end{table}
