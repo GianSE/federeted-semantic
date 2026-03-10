@@ -3,10 +3,10 @@ import torch
 import numpy as np
 import sqlite3
 import os
-import json
 import time
 from datetime import datetime
-from config import REQUIRED_CLIENTS, CHAOS_SCENARIO, TEST_BATCH_SIZE, ROUND_TIMEOUT, MODEL_TYPE, LATENT_DIM
+from config import REQUIRED_CLIENTS, CHAOS_SCENARIO, TEST_BATCH_SIZE, ROUND_TIMEOUT, MODEL_TYPE, LATENT_DIM, TEXT_CHUNK_OVERLAP, TEXT_CHUNK_SIZE, TEXT_RECONSTRUCTION_MODE
+from text_utils import decode_tokens
 
 app = Flask(__name__)
 
@@ -25,6 +25,93 @@ def log_terminal(msg):
     print(formatted_msg, flush=True)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(formatted_msg + "\n")
+
+
+def load_checkpoint_if_compatible(model, path="global_model.pth"):
+    if not os.path.exists(path):
+        return False
+    try:
+        state_dict = torch.load(path, map_location="cpu", weights_only=True)
+        model.load_state_dict(state_dict)
+        return True
+    except Exception as exc:
+        log_terminal(f"⚠️ Checkpoint incompatível ignorado: {exc}")
+        return False
+
+
+def get_text_stack():
+    from model_utils import get_model
+    from text_utils import build_or_load_vocab, MAX_VOCAB_SIZE, MAX_SEQ_LEN
+
+    vocab = build_or_load_vocab()
+    model = get_model(MODEL_TYPE, vocab_size=MAX_VOCAB_SIZE, seq_len=MAX_SEQ_LEN, latent_dim=LATENT_DIM)
+    load_checkpoint_if_compatible(model)
+    model.eval()
+    return model, vocab, MAX_SEQ_LEN
+
+
+def decode_chunk_latent(model, vocab, latent_tensor):
+    with torch.no_grad():
+        logits = model.decode(latent_tensor)
+        predictions = torch.argmax(logits, dim=-1)
+    from text_utils import decode_tokens
+
+    return predictions.squeeze(0), decode_tokens(predictions.squeeze(0).tolist(), vocab)
+
+
+def encode_text_chunks(model, vocab, text, chunk_size=None, overlap=None, mode=None):
+    from text_utils import decode_tokens, stitch_text_chunks, text_to_chunk_tensors
+
+    chunk_size = chunk_size or TEXT_CHUNK_SIZE
+    overlap = TEXT_CHUNK_OVERLAP if overlap is None else overlap
+    mode = mode or TEXT_RECONSTRUCTION_MODE
+
+    chunk_tensors, chunk_ids = text_to_chunk_tensors(text, vocab, chunk_size=chunk_size, overlap=overlap)
+    payload_chunks = []
+    reconstructed_chunks = []
+
+    with torch.no_grad():
+        for chunk_id, (chunk_tensor, token_ids) in enumerate(zip(chunk_tensors, chunk_ids)):
+            batch = chunk_tensor.unsqueeze(0)
+            if MODEL_TYPE == "vae":
+                mu, logvar = model.encode(batch)
+                latent = mu if mode == "semantic" else model.reparameterize(mu, logvar)
+            else:
+                latent = model.encode(batch)
+
+            predictions, reconstructed_text = decode_chunk_latent(model, vocab, latent)
+            payload_chunks.append({
+                "chunk_id": chunk_id,
+                "source_tokens": token_ids,
+                "source_text": decode_tokens(token_ids, vocab),
+                "latent": latent.squeeze(0).tolist(),
+                "reconstructed_tokens": predictions.tolist(),
+                "reconstructed_text": reconstructed_text,
+            })
+            reconstructed_chunks.append(reconstructed_text)
+
+    return payload_chunks, stitch_text_chunks(reconstructed_chunks)
+
+
+def generate_from_payload(model, vocab, chunks):
+    from text_utils import stitch_text_chunks
+
+    reconstructed_chunks = []
+    normalized_chunks = []
+    for index, chunk in enumerate(chunks):
+        latent_values = chunk.get("latent") if isinstance(chunk, dict) else chunk
+        latent_tensor = torch.tensor(latent_values, dtype=torch.float32).unsqueeze(0)
+        predictions, reconstructed_text = decode_chunk_latent(model, vocab, latent_tensor)
+        normalized_chunks.append({
+            "chunk_id": chunk.get("chunk_id", index) if isinstance(chunk, dict) else index,
+            "latent": latent_values,
+            "reconstructed_tokens": predictions.tolist(),
+            "reconstructed_text": reconstructed_text,
+        })
+        reconstructed_chunks.append(reconstructed_text)
+
+    normalized_chunks.sort(key=lambda item: item["chunk_id"])
+    return normalized_chunks, stitch_text_chunks([chunk["reconstructed_text"] for chunk in normalized_chunks])
 
 def reconstruct_weights(partial_weights, node_id):
     """Reconstrói pesos comprimidos (Top-K) substituindo NaN pela média"""
@@ -97,32 +184,32 @@ def upload_weights():
         return jsonify({"error": str(e)}), 500
 
 def evaluate_global_model():
-    """Avalia o modelo global em imagens de teste e retorna MSE, PSNR e SSIM"""
+    """Avalia o modelo global em batches de textos de teste e retorna CE Loss e Acurácia"""
     try:
         from model_utils import get_model
-        from image_utils import load_mnist, get_random_batch, compute_mse, compute_psnr, compute_ssim
+        from text_utils import load_text_dataset, get_random_batch_text, compute_accuracy, compute_cross_entropy, MAX_VOCAB_SIZE, MAX_SEQ_LEN
         
-        model = get_model(MODEL_TYPE, LATENT_DIM)
-        model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
+        model = get_model(MODEL_TYPE, vocab_size=MAX_VOCAB_SIZE, seq_len=MAX_SEQ_LEN, latent_dim=LATENT_DIM)
+        load_checkpoint_if_compatible(model)
         model.eval()
         
-        dataset = load_mnist(train=False)
-        images, _ = get_random_batch(dataset, batch_size=TEST_BATCH_SIZE)
+        dataset, _ = load_text_dataset(train=False)
+        inputs, targets = get_random_batch_text(dataset, batch_size=TEST_BATCH_SIZE)
         
         with torch.no_grad():
-            output = model(images)
-            if isinstance(output, tuple):  # VAE retorna (recon, mu, logvar)
-                reconstructed = output[0]
+            output = model(inputs)
+            if isinstance(output, tuple):  # VAE retorna (logits, mu, logvar)
+                logits = output[0]
             else:
-                reconstructed = output
+                logits = output
         
-        mse = compute_mse(images, reconstructed)
-        psnr = compute_psnr(images, reconstructed)
-        ssim = compute_ssim(images, reconstructed)
-        return mse, psnr, ssim
+        accuracy = compute_accuracy(targets, logits)
+        ce_loss = compute_cross_entropy(targets, logits)
+        
+        return ce_loss, accuracy * 100.0
     except Exception as e:
         log_terminal(f"⚠️ Erro na avaliação: {e}")
-        return None, None, None
+        return None, None
 
 def aggregate_weights():
     """FedAvg: média dos pesos de todos os clientes"""
@@ -144,10 +231,10 @@ def aggregate_weights():
         log_terminal(f"💾 Modelo Global salvo! [Rodada {current_round}]")
         
         # Avaliação do modelo global
-        mse, psnr, ssim = evaluate_global_model()
-        if mse is not None:
-            log_terminal(f"📊 Avaliação Global: MSE={mse:.6f} | PSNR={psnr:.1f} dB | SSIM={ssim:.4f}")
-            log_round_metrics(current_round, mse, psnr, ssim)
+        ce_loss, acc = evaluate_global_model()
+        if ce_loss is not None:
+            log_terminal(f"📊 Avaliação Global: CE Loss={ce_loss:.4f} | Accuracy={acc:.1f}%")
+            log_round_metrics(current_round, ce_loss, acc)
         
         round_buffer.clear()
         log_terminal(f"🏁 Rodada {current_round} finalizada. Buffer limpo.\n")
@@ -156,67 +243,153 @@ def aggregate_weights():
         log_terminal(f"❌ Erro na agregação: {e}")
 
 @app.route('/reconstruct', methods=['POST'])
-def reconstruct_image():
+def reconstruct_text():
     """
-    Endpoint de comunicação semântica:
-    Recebe vetor latente (32 dims) e retorna imagem reconstruída (28x28).
+    Endpoint de comunicação semântica para texto:
+    Recebe vetor latente (ex: 32 dims) e retorna a sequência de tokens reconstruída.
     Simula: Dispositivo A envia representação comprimida → Dispositivo B reconstrói.
     """
     try:
-        from model_utils import get_model
-        
         data = request.json
+        model, vocab, _ = get_text_stack()
         latent = torch.tensor(data['latent'], dtype=torch.float32).unsqueeze(0)
-        
-        model = get_model(MODEL_TYPE, LATENT_DIM)
-        if os.path.exists("global_model.pth"):
-            model.load_state_dict(torch.load("global_model.pth", map_location="cpu"))
-        model.eval()
-        
-        with torch.no_grad():
-            recon = model.decode(latent)
+        predictions, reconstructed_text = decode_chunk_latent(model, vocab, latent)
         
         return jsonify({
             "status": "ok",
-            "image": recon.squeeze().numpy().tolist()
+            "tokens": predictions.tolist(),
+            "text": reconstructed_text,
         }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/complete', methods=['POST'])
-def complete_image():
+def complete_text():
     """
-    Endpoint de completação de imagem:
-    Recebe imagem parcial (mascarada) → Autoencoder reconstrói imagem completa.
-    Simula: envio de pedaços da imagem, modelo completa o restante.
+    Endpoint de completação de texto:
+    Recebe sequência parcial (mascarada com pads) → Autoencoder reconstrói sequência completa.
     """
     try:
-        from model_utils import get_model
-        
         data = request.json
-        partial = torch.tensor(data['image'], dtype=torch.float32)
-        if partial.dim() == 2:
-            partial = partial.unsqueeze(0).unsqueeze(0)  # [1, 1, 28, 28]
-        elif partial.dim() == 3:
-            partial = partial.unsqueeze(0)
-        
-        model = get_model(MODEL_TYPE, LATENT_DIM)
-        if os.path.exists("global_model.pth"):
-            model.load_state_dict(torch.load("global_model.pth", map_location="cpu"))
-        model.eval()
-        
+        model, vocab, _ = get_text_stack()
+        partial = torch.tensor(data['tokens'], dtype=torch.long)
+        if partial.dim() == 1:
+            partial = partial.unsqueeze(0)  # [1, seq_len]
+
         with torch.no_grad():
             output = model(partial)
             if isinstance(output, tuple):
-                recon = output[0]
+                logits = output[0]
             else:
-                recon = output
+                logits = output
+            
+            predictions = torch.argmax(logits, dim=-1)
         
         return jsonify({
             "status": "ok",
-            "image": recon.squeeze().numpy().tolist()
+            "tokens": predictions.squeeze().numpy().tolist(),
+            "text": decode_tokens(predictions.squeeze().tolist(), vocab),
         }), 200
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/compress_text', methods=['POST'])
+def compress_text():
+    try:
+        data = request.json or {}
+        text = (data.get('text') or '').strip()
+        if not text:
+            return jsonify({"error": "Campo 'text' é obrigatório."}), 400
+
+        model, vocab, max_seq_len = get_text_stack()
+        chunk_size = min(int(data.get('chunk_size', TEXT_CHUNK_SIZE)), max_seq_len)
+        overlap = min(int(data.get('overlap', TEXT_CHUNK_OVERLAP)), max(0, chunk_size - 1))
+        mode = data.get('mode', TEXT_RECONSTRUCTION_MODE)
+        chunks, reconstructed_text = encode_text_chunks(model, vocab, text, chunk_size=chunk_size, overlap=overlap, mode=mode)
+
+        return jsonify({
+            "status": "ok",
+            "mode": mode,
+            "chunk_size": chunk_size,
+            "overlap": overlap,
+            "num_chunks": len(chunks),
+            "chunks": chunks,
+            "reconstructed_text": reconstructed_text,
+        }), 200
+    except Exception as e:
+        log_terminal(f"❌ Erro em /compress_text: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/generate_text', methods=['POST'])
+def generate_text():
+    try:
+        data = request.json or {}
+        chunks = data.get('chunks') or data.get('latents')
+        if not chunks:
+            return jsonify({"error": "Envie 'chunks' ou 'latents'."}), 400
+
+        model, vocab, _ = get_text_stack()
+        normalized_chunks, reconstructed_text = generate_from_payload(model, vocab, chunks)
+
+        return jsonify({
+            "status": "ok",
+            "num_chunks": len(normalized_chunks),
+            "chunks": normalized_chunks,
+            "text": reconstructed_text,
+        }), 200
+    except Exception as e:
+        log_terminal(f"❌ Erro em /generate_text: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/complete_text', methods=['POST'])
+def complete_document_text():
+    try:
+        from text_utils import build_masked_document, decode_tokens, stitch_text_chunks
+
+        data = request.json or {}
+        text = (data.get('text') or '').strip()
+        if not text:
+            return jsonify({"error": "Campo 'text' é obrigatório."}), 400
+
+        strategy = data.get('strategy', 'truncate')
+        mask_ratio = float(data.get('mask_ratio', 0.5))
+        model, vocab, max_seq_len = get_text_stack()
+        chunk_size = min(int(data.get('chunk_size', TEXT_CHUNK_SIZE)), max_seq_len)
+        overlap = min(int(data.get('overlap', TEXT_CHUNK_OVERLAP)), max(0, chunk_size - 1))
+
+        masked_tensors, masked_text = build_masked_document(text, vocab, strategy=strategy, mask_ratio=mask_ratio, chunk_size=chunk_size, overlap=overlap)
+
+        completed_chunks = []
+        completed_texts = []
+        with torch.no_grad():
+            for chunk_id, tensor in enumerate(masked_tensors):
+                output = model(tensor.unsqueeze(0))
+                logits = output[0] if isinstance(output, tuple) else output
+                predictions = torch.argmax(logits, dim=-1).squeeze(0)
+                completed_text = decode_tokens(predictions.tolist(), vocab)
+                completed_chunks.append({
+                    "chunk_id": chunk_id,
+                    "masked_tokens": tensor.tolist(),
+                    "completed_tokens": predictions.tolist(),
+                    "completed_text": completed_text,
+                })
+                completed_texts.append(completed_text)
+
+        return jsonify({
+            "status": "ok",
+            "strategy": strategy,
+            "mask_ratio": mask_ratio,
+            "chunk_size": chunk_size,
+            "overlap": overlap,
+            "masked_text": masked_text,
+            "completed_text": stitch_text_chunks(completed_texts),
+            "chunks": completed_chunks,
+        }), 200
+    except Exception as e:
+        log_terminal(f"❌ Erro em /complete_text: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/reset_round', methods=['POST'])
@@ -240,14 +413,16 @@ def log_to_db(node_id, bytes_sent, loss, round_number):
     except Exception as e:
         log_terminal(f"⚠️ Erro ao salvar no DB: {e}")
 
-def log_round_metrics(round_number, global_mse, global_psnr, global_ssim=None):
+def log_round_metrics(round_number, global_celoss, global_accuracy):
     try:
         conn = sqlite3.connect('metrics.db', timeout=10)
         cursor = conn.cursor()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         scenario = os.environ.get("CHAOS_SCENARIO", CHAOS_SCENARIO)
-        cursor.execute("INSERT INTO round_metrics VALUES (?, ?, ?, ?, ?, ?)",
-                     (round_number, global_mse, global_psnr, timestamp, scenario, global_ssim or 0.0))
+        cursor.execute(
+            "INSERT INTO round_metrics (round_number, global_celoss, global_accuracy, timestamp, chaos_scenario) VALUES (?, ?, ?, ?, ?)",
+            (round_number, global_celoss, global_accuracy, timestamp, scenario),
+        )
         conn.commit()
         conn.close()
     except Exception as e:

@@ -8,6 +8,8 @@ import copy
 import numpy as np
 from datetime import datetime
 
+from config import BATCH_SIZE, COMPRESSION_RATIO, LEARNING_RATE, LOCAL_EPOCHS
+
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -49,33 +51,44 @@ def compress_weights_top_k(weight_dict, compression_ratio=0.5):
         
     return compressed_payload
 
-def train_and_upload(model, images, server_url, node_id, model_type="autoencoder", vae_beta=1.0, channel_snr_db=None):
-    """Treina o modelo (AE ou VAE) localmente e envia pesos ao servidor"""
+def train_and_upload(model, text_batch, server_url, node_id, model_type="autoencoder", vae_beta=1.0, channel_snr_db=None):
+    """Treina o modelo (AE ou VAE textual) localmente e envia pesos ao servidor"""
     try:
-        model_before = copy.deepcopy(model)
-        
-        optimizer = optim.Adam(model.parameters(), lr=0.001)
-        criterion = nn.MSELoss()
+        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+        criterion = nn.CrossEntropyLoss()
         model.train()
 
         # --- TREINO LOCAL ---
         is_vae = model_type == "vae"
-        tag = "VAE" if is_vae else "Autoencoder"
-        log_terminal(f"🔥 Treinando {tag} ({images.shape[0]} imagens)...", node_id)
-        epochs = 5
+        tag = "TextVAE" if is_vae else "TextAutoencoder"
+        
+        # text_batch é uma tupla (inputs, targets) que para o AE são idênticos: (batch_size, seq_len)
+        inputs, targets = text_batch
+        
+        log_terminal(f"🔥 Treinando {tag} ({inputs.shape[0]} mensagens)...", node_id)
         final_loss = 0
         
-        for epoch in range(epochs):
+        for _ in range(LOCAL_EPOCHS):
             optimizer.zero_grad()
             if is_vae:
-                from model_utils import ImageVAE
-                reconstructed, mu, logvar = model(images, snr_db=channel_snr_db)
-                recon_loss = criterion(reconstructed, images)
-                kl_loss = ImageVAE.kl_divergence(mu, logvar)
+                from model_utils import TextVAE
+                logits, mu, logvar = model(inputs, snr_db=channel_snr_db)
+                
+                # Reshape para CrossEntropy: (batch_size * seq_len, vocab_size) e (batch_size * seq_len)
+                logits_flat = logits.view(-1, logits.size(-1))
+                targets_flat = targets.view(-1)
+                
+                recon_loss = criterion(logits_flat, targets_flat)
+                kl_loss = TextVAE.kl_divergence(mu, logvar)
                 loss = recon_loss + vae_beta * kl_loss
             else:
-                reconstructed = model(images, snr_db=channel_snr_db)
-                loss = criterion(reconstructed, images)
+                logits = model(inputs, snr_db=channel_snr_db)
+                
+                logits_flat = logits.view(-1, logits.size(-1))
+                targets_flat = targets.view(-1)
+                
+                loss = criterion(logits_flat, targets_flat)
+                
             loss.backward()
             optimizer.step()
             final_loss = loss.item()
@@ -83,22 +96,24 @@ def train_and_upload(model, images, server_url, node_id, model_type="autoencoder
         # Info de compressão semântica
         with torch.no_grad():
             if is_vae:
-                mu, _ = model.encode(images)
+                mu, _ = model.encode(inputs)
                 z = mu
             else:
-                z = model.encode(images)
-            pixels = images.numel()
+                z = model.encode(inputs)
+            
+            # Número de tokens de entrada vs tamanho do vetor latente
+            tokens = inputs.numel()
             latent_size = z.numel()
-            compression = pixels / latent_size
+            compression = tokens / latent_size
         
-        log_terminal(f"📊 Loss: {final_loss:.6f} | Compressão semântica: {compression:.0f}x ({latent_size} vs {pixels} valores)", node_id)
+        log_terminal(f"📊 Loss (CE): {final_loss:.4f} | Compressão semântica: {compression:.0f}x ({latent_size} dims vs {tokens} tokens)", node_id)
 
         # --- ENVIO DOS PESOS ---
         full_weights = model.state_dict()
         
         if "full" not in node_id:
-            log_terminal("⚠️ Aplicando Compressão Top-K (60%)...", node_id)
-            final_payload = compress_weights_top_k(full_weights, compression_ratio=0.6)
+            log_terminal(f"⚠️ Aplicando Compressão Top-K ({COMPRESSION_RATIO:.0%})...", node_id)
+            final_payload = compress_weights_top_k(full_weights, compression_ratio=COMPRESSION_RATIO)
         else:
             final_payload = {k: v.cpu().numpy().tolist() for k, v in full_weights.items()}
 

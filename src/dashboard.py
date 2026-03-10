@@ -1,655 +1,407 @@
+import json
+import os
+import sqlite3
+import time
+
+import pandas as pd
+import requests
 import streamlit as st
 
-# ============================================================
-# DEVE SER A PRIMEIRA CHAMADA STREAMLIT
-# ============================================================
-st.set_page_config(layout="wide", page_title="FL Semântico", page_icon="🛰️")
+from config import NONIID_LABELS, TEXT_CHUNK_OVERLAP, TEXT_CHUNK_SIZE, TEXT_RECONSTRUCTION_MODE
+MAX_MODEL_CHUNK = int(TEXT_CHUNK_SIZE)
 
-import sqlite3
-import pandas as pd
-import time
-from datetime import datetime, timedelta
-import os
-import json
-import torch
-import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 
-# ============================================================
-# Imports do projeto
-# ============================================================
 try:
-    from model_utils import ImageAutoencoder, get_model
-    from image_utils import (load_mnist, get_random_batch,
-                             mask_image_bottom, mask_image_random,
-                             mask_image_right, compute_mse, compute_psnr, compute_ssim)
-    from config import MODEL_TYPE, LATENT_DIM
+    from text_utils import decode_tokens, get_random_sample_text, load_text_dataset
     IMPORTS_OK = True
-except ImportError as e:
+except ImportError:
     IMPORTS_OK = False
-    MODEL_TYPE = "autoencoder"
-    LATENT_DIM = 32
 
-# ============================================================
-# Estilo CSS
-# ============================================================
-st.markdown("""
-<style>
-.terminal-container {
-    height: 400px; overflow-y: auto;
-    background-color: #0e1117; color: #00ff00;
-    font-family: 'Courier New', monospace; padding: 12px;
-    white-space: pre-wrap; border-radius: 8px;
-    font-size: 13px; line-height: 1.4;
-    display: flex; flex-direction: column-reverse;
-}
-.metric-card {
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-    padding: 16px; border-radius: 10px; text-align: center;
-    border: 1px solid #0f3460;
-}
-.metric-card h3 { color: #e94560; margin: 0; font-size: 28px; }
-.metric-card p { color: #a0a0a0; margin: 4px 0 0 0; font-size: 13px; }
-.topology-box {
-    background: #0e1117; border-radius: 10px; padding: 20px;
-    border: 1px solid #333; text-align: center;
-}
-</style>
-""", unsafe_allow_html=True)
+
+st.set_page_config(layout="wide", page_title="FL Semântico Textual", page_icon="🛰️")
 
 STATUS_FILE = "status.json"
 DB_FILE = "metrics.db"
+RESULTS_DIR = "results"
+SERVER_URL = os.environ.get("SERVER_URL", "http://fl-server:5000")
 
-def set_status(s):
-    with open(STATUS_FILE, "w") as f:
-        json.dump({"status": s}, f)
+st.markdown(
+    """
+<style>
+.terminal-container {
+    height: 400px;
+    overflow-y: auto;
+    background: #121417;
+    color: #dce7ea;
+    font-family: Consolas, monospace;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid #283038;
+    white-space: pre-wrap;
+}
+.panel-box {
+    border: 1px solid #283038;
+    border-radius: 12px;
+    padding: 16px;
+    background: linear-gradient(180deg, #faf7ef 0%, #f2eee2 100%);
+    min-height: 240px;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+
+def set_status(status):
+    with open(STATUS_FILE, "w", encoding="utf-8") as handle:
+        json.dump({"status": status}, handle)
+
 
 def get_status():
-    if os.path.exists(STATUS_FILE):
-        try:
-            with open(STATUS_FILE) as f:
-                return json.load(f).get("status", "PAUSED")
-        except Exception:
-            pass
-    return "PAUSED"
+    if not os.path.exists(STATUS_FILE):
+        return "PAUSED"
+    try:
+        with open(STATUS_FILE, encoding="utf-8") as handle:
+            return json.load(handle).get("status", "PAUSED")
+    except Exception:
+        return "PAUSED"
+
+
+def load_round_metrics_db():
+    if not os.path.exists(DB_FILE):
+        return pd.DataFrame()
+
+    conn = sqlite3.connect(DB_FILE, timeout=5)
+    try:
+        df = pd.read_sql(
+            "SELECT round_number, global_celoss, global_accuracy, timestamp, chaos_scenario FROM round_metrics ORDER BY round_number ASC",
+            conn,
+        )
+    except Exception:
+        df = pd.DataFrame()
+    finally:
+        conn.close()
+    return df
+
+
+def load_training_logs_db():
+    if not os.path.exists(DB_FILE):
+        return pd.DataFrame()
+    conn = sqlite3.connect(DB_FILE, timeout=5)
+    try:
+        df = pd.read_sql(
+            "SELECT round_number, node_id, loss FROM training_logs WHERE round_number > 0 ORDER BY round_number ASC",
+            conn,
+        )
+    except Exception:
+        df = pd.DataFrame()
+    finally:
+        conn.close()
+    return df
+
 
 def get_current_round():
-    try:
-        if not os.path.exists(DB_FILE):
-            return 0
-        conn = sqlite3.connect(DB_FILE, timeout=5)
-        cur = conn.execute("SELECT MAX(round_number) FROM round_metrics")
-        row = cur.fetchone()
-        conn.close()
-        return row[0] if row[0] else 0
-    except Exception:
+    df = load_round_metrics_db()
+    if df.empty:
         return 0
+    return int(df["round_number"].max())
 
-# ============================================================
-# SIDEBAR: Play / Pause
-# ============================================================
-st.sidebar.title("🛰️ FL Control Panel")
+
+@st.cache_resource(show_spinner=False)
+def get_test_dataset():
+    if not IMPORTS_OK:
+        return None, None
+    return load_text_dataset(train=False)
+
+
+def sample_text():
+    dataset, vocab = get_test_dataset()
+    if dataset is None or vocab is None:
+        return "", None
+    sample_tensor, _, label = get_random_sample_text(dataset)
+    return decode_tokens(sample_tensor.tolist(), vocab), label
+
+
+def call_api(endpoint, payload):
+    response = requests.post(f"{SERVER_URL}{endpoint}", json=payload, timeout=120)
+    response.raise_for_status()
+    return response.json()
+
+
+def read_log(filename):
+    path = os.path.join("logs", filename)
+    if not os.path.exists(path):
+        return "Aguardando logs..."
+    with open(path, encoding="utf-8", errors="ignore") as handle:
+        lines = handle.readlines()
+    return "".join(lines[-60:])
+
+
+def reset_db():
+    if os.path.exists(DB_FILE):
+        os.remove(DB_FILE)
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute("CREATE TABLE IF NOT EXISTS training_logs (timestamp TEXT, node_id TEXT, bytes_sent INTEGER, loss REAL, round_number INTEGER)")
+    conn.execute("CREATE TABLE IF NOT EXISTS round_metrics (round_number INTEGER, global_celoss REAL, global_accuracy REAL, timestamp TEXT, chaos_scenario TEXT)")
+    conn.commit()
+    conn.close()
+
+
+def load_round_metrics_csv(path):
+    return pd.read_csv(path)
+
+
+st.sidebar.title("🛰️ Painel FL Textual")
 status = get_status()
-current_round = get_current_round()
-
-st.sidebar.markdown(f"**Rodada Atual:** `{current_round}`")
+st.sidebar.markdown(f"**Rodada Atual:** {get_current_round()}")
 
 if status == "RUNNING":
-    st.sidebar.success("🟢 RODANDO")
-    if st.sidebar.button("⏸️ PAUSAR"):
-        set_status("PAUSED"); st.rerun()
+    st.sidebar.success("Treinamento em execução")
+    if st.sidebar.button("Pausar"):
+        set_status("PAUSED")
+        st.rerun()
 else:
-    st.sidebar.warning("⏸️ PAUSADO")
-    if st.sidebar.button("▶️ INICIAR"):
-        set_status("RUNNING"); st.rerun()
+    st.sidebar.warning("Treinamento pausado")
+    if st.sidebar.button("Iniciar"):
+        set_status("RUNNING")
+        st.rerun()
 
-# ============================================================
-# SIDEBAR: Cenários Rápidos
-# ============================================================
 st.sidebar.divider()
-st.sidebar.subheader("⚡ Cenários de Caos")
-
-PRESETS = {
-    "Normal (Sem Caos)":  {"loss": 0.0, "delay": 0, "corrupt": 0.0, "dup": 0.0, "active": False},
-    "Leve":               {"loss": 1.0, "delay": 200, "corrupt": 0.0, "dup": 0.0, "active": True},
-    "Moderado":           {"loss": 3.0, "delay": 500, "corrupt": 0.5, "dup": 1.0, "active": True},
-    "Severo":             {"loss": 5.0, "delay": 1000, "corrupt": 2.0, "dup": 5.0, "active": True},
+st.sidebar.subheader("Cenários de Caos")
+presets = {
+    "Normal": {"loss": 0.0, "delay": 0, "corrupt": 0.0, "dup": 0.0, "active": False},
+    "Leve": {"loss": 1.0, "delay": 200, "corrupt": 0.0, "dup": 0.0, "active": True},
+    "Moderado": {"loss": 3.0, "delay": 500, "corrupt": 0.5, "dup": 1.0, "active": True},
+    "Severo": {"loss": 5.0, "delay": 1000, "corrupt": 2.0, "dup": 5.0, "active": True},
 }
+selected_preset = st.sidebar.selectbox("Preset", list(presets.keys()))
+if st.sidebar.button("Aplicar preset"):
+    preset = presets[selected_preset]
+    status_label = "ON" if preset["active"] else "OFF"
+    with open("chaos_config.txt", "w", encoding="utf-8") as handle:
+        handle.write(f"{status_label} {preset['loss']:.2f} {preset['delay']} {preset['corrupt']:.2f} {preset['dup']:.2f}")
+    st.sidebar.success(f"Preset {selected_preset} aplicado")
 
-preset_choice = st.sidebar.selectbox("Cenário Rápido:", list(PRESETS.keys()))
-if st.sidebar.button("🎯 Aplicar Cenário"):
-    p = PRESETS[preset_choice]
-    st.session_state.loss_val = p["loss"]
-    st.session_state.delay_val = p["delay"]
-    st.session_state.corrupt_val = p["corrupt"]
-    st.session_state.dup_val = p["dup"]
-    s = "ON" if p["active"] else "OFF"
-    with open("chaos_config.txt", "w") as f:
-        f.write(f"{s} {p['loss']:.2f} {p['delay']} {p['corrupt']:.2f} {p['dup']:.2f}")
-    st.sidebar.success(f"Cenário '{preset_choice}' aplicado!")
-
-# ============================================================
-# SIDEBAR: Controles de Caos Manual
-# ============================================================
-with st.sidebar.expander("🔧 Controle Manual de Caos"):
-    chaos_active = st.toggle("Ativar Instabilidade", value=True)
-    
-    if 'loss_val' not in st.session_state: st.session_state.loss_val = 0.0
-    if 'delay_val' not in st.session_state: st.session_state.delay_val = 0
-    if 'corrupt_val' not in st.session_state: st.session_state.corrupt_val = 0.0
-    if 'dup_val' not in st.session_state: st.session_state.dup_val = 0.0
-
-    loss_v = st.slider("Perda Pacotes (%)", 0.0, 5.0, st.session_state.loss_val, format="%.2f", key="m_loss")
-    delay_v = st.slider("Latência (ms)", 0, 2000, st.session_state.delay_val, key="m_delay")
-    corrupt_v = st.slider("Corrupção (%)", 0.0, 2.0, st.session_state.corrupt_val, step=0.01, format="%.2f", key="m_corrupt")
-    dup_v = st.slider("Duplicação (%)", 0.0, 5.0, st.session_state.dup_val, step=0.1, format="%.1f", key="m_dup")
-
-    if st.button("⚡ Aplicar"):
-        s = "ON" if chaos_active else "OFF"
-        with open("chaos_config.txt", "w") as f:
-            f.write(f"{s} {loss_v:.2f} {delay_v} {corrupt_v:.2f} {dup_v:.2f}")
-        st.session_state.loss_val = loss_v
-        st.session_state.delay_val = delay_v
-        st.session_state.corrupt_val = corrupt_v
-        st.session_state.dup_val = dup_v
-        st.success("Caos aplicado!")
-
-# Reset DB
 st.sidebar.divider()
-if st.sidebar.button("🗑️ Limpar Histórico (Reset DB)"):
-    try:
-        if os.path.exists(DB_FILE):
-            os.remove(DB_FILE)
-        conn = sqlite3.connect(DB_FILE)
-        conn.execute("CREATE TABLE IF NOT EXISTS training_logs (timestamp TEXT, node_id TEXT, bytes_sent INTEGER, loss REAL, round_number INTEGER)")
-        conn.execute("CREATE TABLE IF NOT EXISTS round_metrics (round_number INTEGER, global_mse REAL, global_psnr REAL, timestamp TEXT, chaos_scenario TEXT, global_ssim REAL)")
-        conn.commit(); conn.close()
-        st.sidebar.success("Histórico resetado!")
-        time.sleep(1); st.rerun()
-    except Exception as e:
-        st.sidebar.error(f"Erro: {e}")
+if st.sidebar.button("Limpar histórico"):
+    reset_db()
+    st.sidebar.success("Banco reiniciado")
+    time.sleep(1)
+    st.rerun()
 
-# ============================================================
-# MAIN AREA
-# ============================================================
-st.title("🛰️ Aprendizado Federado: Comunicação Semântica de Imagens")
+st.title("🛰️ Aprendizado Federado para Comunicação Semântica de Texto")
+st.caption("Fluxo 100% textual com treinamento federado, compressão latente por chunks e reconstrução no destino.")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "📐 Arquitetura", "📡 Comunicação", "🧩 Completação", 
-    "🧠 Terminais", "📊 Métricas", "📈 Experimentos"
-])
+tab_arch, tab_transfer, tab_completion, tab_logs, tab_metrics, tab_exp = st.tabs(
+    ["Arquitetura", "Transferência", "Completação", "Terminais", "Métricas", "Experimentos"]
+)
 
-# ============================================================
-# TAB 0: Arquitetura / Topologia
-# ============================================================
-with tab1:
-    st.subheader("Topologia do Sistema Federado")
-    
-    st.markdown("""
-    O sistema é composto por **3 clientes** com perfis distintos que treinam localmente 
-    e enviam seus pesos ao **servidor central** para agregação via **FedAvg**.
-    """)
-    
-    # Topology diagram using graphviz
-    st.graphviz_chart('''
-    digraph FL {
-        rankdir=TB;
-        node [shape=box, style="rounded,filled", fontname="Helvetica"];
-        edge [fontname="Helvetica", fontsize=10];
-        
-        subgraph cluster_clients {
-            label="Clientes Locais";
-            style="dashed"; color="#666";
-            
-            full [label="🔵 client-full\\nDados: IID (todos)\\nPesos: Completos\\nRede: Estável", 
-                  fillcolor="#E3F2FD", color="#2196F3", penwidth=2];
-            noisy [label="🟠 client-noisy\\nDados: IID (todos)\\nPesos: Top-K (40%)\\nRede: Caos (tc netem)", 
-                   fillcolor="#FFF3E0", color="#FF9800", penwidth=2];
-            noniid [label="🟢 client-noniid\\nDados: Non-IID (0-3)\\nPesos: Completos\\nRede: Estável", 
-                    fillcolor="#E8F5E9", color="#4CAF50", penwidth=2];
-        }
-        
-        server [label="🧠 Servidor FL\\nAgregação FedAvg\\nAvaliação Global", 
-                fillcolor="#F3E5F5", color="#9C27B0", penwidth=2];
-        
-        global_model [label="📦 Modelo Global\\nglobal_model.pth\\n(Autoencoder 784→32→784)", 
-                      fillcolor="#FFFDE7", color="#FFC107", penwidth=2];
-        
-        chaos [label="💥 Chaos Injector\\ntc netem\\n(loss/delay/corrupt)", 
-               fillcolor="#FFEBEE", color="#F44336", penwidth=2, shape=diamond];
-        
-        full -> server [label="  Pesos completos  ", color="#2196F3"];
-        noisy -> server [label="  Pesos Top-K  ", color="#FF9800", style="dashed"];
-        noniid -> server [label="  Pesos completos  ", color="#4CAF50"];
-        
-        server -> global_model [label="  FedAvg  ", color="#9C27B0", penwidth=2];
-        global_model -> full [label="  Download  ", style="dotted"];
-        global_model -> noisy [label="  Download  ", style="dotted"];
-        global_model -> noniid [label="  Download  ", style="dotted"];
-        
-        chaos -> noisy [label="  Interfere  ", color="#F44336", style="bold"];
-    }
-    ''')
-    
-    # Client profiles
-    st.subheader("Perfis dos Clientes")
-    c1, c2, c3 = st.columns(3)
-    
-    with c1:
-        st.markdown("""
-        #### 🔵 client-full (Estável)
-        - **Dados:** IID — todos os 10 dígitos
-        - **Pesos:** Enviados completos (100%)
-        - **Rede:** Sem perturbação
-        - **Papel:** Baseline confiável
-        """)
-    
-    with c2:
-        st.markdown("""
-        #### 🟠 client-noisy (Instável)
-        - **Dados:** IID — todos os 10 dígitos
-        - **Pesos:** Compressão Top-K (60% zerados)
-        - **Rede:** Caos: loss, latência, corrupção
-        - **Papel:** Testa resiliência do FL
-        """)
-    
-    with c3:
-        st.markdown("""
-        #### 🟢 client-noniid (Heterogêneo)
-        - **Dados:** Non-IID — apenas dígitos 0-3
-        - **Pesos:** Enviados completos (100%)
-        - **Rede:** Sem perturbação
-        - **Papel:** Testa robustez a dados enviesados
-        """)
-    
-    # Compression info
-    st.subheader("Compressão Semântica")
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.metric("Pixels por Imagem", "784")
-    with m2:
-        st.metric("Dimensão Latente", "32")
-    with m3:
-        st.metric("Fator de Compressão", "24.5×")
-    with m4:
-        st.metric("Redução", "95.9%")
+with tab_arch:
+    st.subheader("Topologia textual")
+    st.markdown(
+        f"""
+O sistema possui três clientes que treinam localmente um autoencoder textual e publicam pesos para o servidor central.
+O servidor agrega por FedAvg, expõe endpoints de compressão e geração textual, e o dashboard opera como console de teste.
 
+- `client-full`: cliente estável com dados IID.
+- `client-noisy`: cliente com compressão Top-K e caos de rede.
+- `client-noniid`: cliente com subconjunto textual Non-IID das classes {NONIID_LABELS}.
+- `fl-server`: agrega pesos e disponibiliza `/compress_text`, `/generate_text` e `/complete_text`.
+        """
+    )
+    st.graphviz_chart(
+        """
+digraph FLText {
+    rankdir=LR;
+    node [shape=box, style="rounded,filled", fontname="Helvetica"];
+    client1 [label="client-full\nIID\nrede estável", fillcolor="#f1f5d6"];
+    client2 [label="client-noisy\nTop-K\ncaos de rede", fillcolor="#fde2b8"];
+    client3 [label="client-noniid\nsubconjunto textual", fillcolor="#dbe8f3"];
+    server [label="fl-server\nFedAvg + API textual", fillcolor="#f4dfd0"];
+    dash [label="dashboard\nentrada manual\ninspeção de payload", fillcolor="#e6eadf"];
+    client1 -> server;
+    client2 -> server;
+    client3 -> server;
+    dash -> server [dir=both];
+}
+        """
+    )
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Chunk padrão", f"{TEXT_CHUNK_SIZE} tokens")
+    col2.metric("Overlap padrão", f"{TEXT_CHUNK_OVERLAP} tokens")
+    col3.metric("Modo padrão", TEXT_RECONSTRUCTION_MODE)
+    col4.metric("Destino", "texto gerado")
 
-# ============================================================
-# TAB 1: Teste de Comunicação Semântica
-# ============================================================
-with tab2:
-    st.subheader("Teste de Comunicação Semântica")
-    st.markdown("""
-    **Conceito:** Um dispositivo comprime a imagem para apenas **32 números** (vetor latente)
-    e envia ao outro dispositivo, que reconstrói a imagem completa.
-    """)
+with tab_transfer:
+    st.subheader("Compressão e geração de texto")
+    if "transfer_text" not in st.session_state:
+        sample, _ = sample_text()
+        st.session_state.transfer_text = sample or "Cole aqui um texto grande para gerar payload semântico por chunks."
 
-    if not IMPORTS_OK:
-        st.error("Erro ao importar módulos do projeto.")
-    else:
-        comm_mode = st.radio("Modo:", ["Imagem única", "Todos os 10 dígitos"], horizontal=True)
-        
-        if comm_mode == "Imagem única" and st.button("🎲 Gerar Nova Imagem", key="comm_btn"):
-            if os.path.exists("global_model.pth"):
-                try:
-                    model = get_model(MODEL_TYPE, LATENT_DIM)
-                    model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
-                    model.eval()
+    col_input, col_options = st.columns([2, 1])
+    with col_input:
+        transfer_text = st.text_area("Texto de origem", key="transfer_text", height=240)
+    with col_options:
+        mode = st.selectbox("Modo", ["semantic", "faithful"], index=0 if TEXT_RECONSTRUCTION_MODE == "semantic" else 1)
+        chunk_size = st.slider("Tokens por chunk", 20, MAX_MODEL_CHUNK, int(TEXT_CHUNK_SIZE), step=5)
+        overlap = st.slider("Overlap", 0, min(30, chunk_size - 1), int(min(TEXT_CHUNK_OVERLAP, chunk_size - 1)))
+        if st.button("Carregar exemplo"):
+            sample, label = sample_text()
+            st.session_state.transfer_text = sample
+            st.caption(f"Exemplo carregado. Label do corpus: {label}")
+            st.rerun()
 
-                    dataset = load_mnist(train=False)
-                    idx = torch.randint(0, len(dataset), (1,)).item()
-                    original, label = dataset[idx]
-                    original = original.unsqueeze(0)
-
-                    with torch.no_grad():
-                        if MODEL_TYPE == "vae":
-                            mu, _ = model.encode(original)
-                            latent = mu
-                            reconstructed = model.decode(mu)
-                        else:
-                            latent = model.encode(original)
-                            reconstructed = model.decode(latent)
-
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.markdown("**Original (784 valores)**")
-                        st.image(original.squeeze().numpy(), width=200, clamp=True)
-                        st.caption(f"Dígito: {label}")
-
-                    with col2:
-                        st.markdown("**Vetor Latente (32 valores)**")
-                        st.bar_chart(latent.squeeze().numpy(), height=200)
-                        st.caption(f"Apenas {latent.numel()} números transmitidos")
-
-                    with col3:
-                        st.markdown("**Reconstruído (784 valores)**")
-                        st.image(reconstructed.squeeze().numpy(), width=200, clamp=True)
-                        mse = compute_mse(original, reconstructed)
-                        psnr = compute_psnr(original, reconstructed)
-                        ssim = compute_ssim(original, reconstructed)
-                        st.caption(f"MSE: {mse:.6f} | PSNR: {psnr:.1f} dB | SSIM: {ssim:.4f}")
-
-                    st.success(f"📡 Compressão: 784 → 32 valores = **{784/32:.0f}x** de redução ({(1-32/784)*100:.1f}%)")
-                except Exception as e:
-                    st.error(f"Erro: {e}")
-            else:
-                st.warning("⏳ Modelo global ainda não disponível. Inicie o treinamento primeiro.")
-        
-        elif comm_mode == "Todos os 10 dígitos" and st.button("🔟 Testar Todos os Dígitos", key="all_digits_btn"):
-            if os.path.exists("global_model.pth"):
-                try:
-                    model = get_model(MODEL_TYPE, LATENT_DIM)
-                    model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
-                    model.eval()
-                    
-                    dataset = load_mnist(train=False)
-                    digit_examples = {}
-                    for i in range(len(dataset)):
-                        img, lbl = dataset[i]
-                        if lbl not in digit_examples:
-                            digit_examples[lbl] = img
-                        if len(digit_examples) == 10:
-                            break
-                    
-                    fig, axes = plt.subplots(2, 10, figsize=(16, 4))
-                    total_mse = 0
-                    total_psnr = 0
-                    total_ssim = 0
-                    
-                    for d in range(10):
-                        img = digit_examples[d].unsqueeze(0)
-                        with torch.no_grad():
-                            output = model(img)
-                            recon = output[0] if isinstance(output, tuple) else output
-                        
-                        mse = compute_mse(img, recon)
-                        psnr = compute_psnr(img, recon)
-                        ssim = compute_ssim(img, recon)
-                        total_mse += mse
-                        total_psnr += psnr
-                        total_ssim += ssim
-                        
-                        axes[0, d].imshow(img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
-                        axes[0, d].set_title(f"{d}", fontsize=12, fontweight='bold')
-                        axes[0, d].axis('off')
-                        
-                        axes[1, d].imshow(recon.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
-                        axes[1, d].set_title(f"{psnr:.0f}dB", fontsize=9, color='green')
-                        axes[1, d].axis('off')
-                    
-                    axes[0, 0].set_ylabel("Original", fontsize=11, rotation=0, labelpad=50, va='center')
-                    axes[1, 0].set_ylabel("Recon.", fontsize=11, rotation=0, labelpad=50, va='center')
-                    fig.tight_layout()
-                    st.pyplot(fig)
-                    plt.close(fig)
-                    
-                    st.success(f"📊 Média: MSE={total_mse/10:.4f} | PSNR={total_psnr/10:.1f} dB | SSIM={total_ssim/10:.4f} | Compressão: 24.5×")
-                except Exception as e:
-                    st.error(f"Erro: {e}")
-            else:
-                st.warning("⏳ Modelo global ainda não disponível.")
-
-# ============================================================
-# TAB 2: Teste de Completação de Imagem
-# ============================================================
-with tab3:
-    st.subheader("Completação de Imagem Parcial")
-    st.markdown("""
-    **Conceito:** Um dispositivo envia apenas **parte** da imagem.
-    O modelo no outro dispositivo **completa** a informação faltante.
-    """)
-
-    mask_type = st.selectbox("Tipo de máscara:", ["Metade Inferior", "Pixels Aleatórios", "Metade Direita"])
-    mask_pct = st.slider("% da imagem mascarada:", 10, 90, 50, step=10) / 100.0
-
-    if not IMPORTS_OK:
-        st.error("Erro ao importar módulos do projeto.")
-    elif st.button("🧩 Testar Completação", key="comp_btn"):
-        if os.path.exists("global_model.pth"):
-            try:
-                model = get_model(MODEL_TYPE, LATENT_DIM)
-                model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
-                model.eval()
-
-                dataset = load_mnist(train=False)
-                idx = torch.randint(0, len(dataset), (1,)).item()
-                original, label = dataset[idx]
-                original = original.unsqueeze(0)
-
-                if mask_type == "Metade Inferior":
-                    masked = mask_image_bottom(original, mask_pct)
-                elif mask_type == "Pixels Aleatórios":
-                    masked = mask_image_random(original, mask_pct)
-                else:
-                    masked = mask_image_right(original, mask_pct)
-
-                with torch.no_grad():
-                    output = model(masked)
-                    completed = output[0] if isinstance(output, tuple) else output
-
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.markdown("**Original**")
-                    st.image(original.squeeze().numpy(), width=200, clamp=True)
-                    st.caption(f"Dígito: {label}")
-
-                with col2:
-                    st.markdown(f"**Enviado ({(1-mask_pct)*100:.0f}% da imagem)**")
-                    st.image(masked.squeeze().numpy(), width=200, clamp=True)
-                    st.caption(f"Máscara: {mask_type}")
-
-                with col3:
-                    st.markdown("**Completado pelo Modelo**")
-                    st.image(completed.squeeze().numpy(), width=200, clamp=True)
-                    mse = compute_mse(original, completed)
-                    psnr = compute_psnr(original, completed)
-                    ssim = compute_ssim(original, completed)
-                    st.caption(f"MSE: {mse:.6f} | PSNR: {psnr:.1f} dB | SSIM: {ssim:.4f}")
-
-                info_sent = (1 - mask_pct) * 100
-                st.info(f"📡 Enviado apenas **{info_sent:.0f}%** da imagem. Modelo completou os **{mask_pct*100:.0f}%** faltantes.")
-            except Exception as e:
-                st.error(f"Erro: {e}")
-        else:
-            st.warning("⏳ Modelo global ainda não disponível. Inicie o treinamento primeiro.")
-
-# ============================================================
-# TAB 3: Terminais (live logs)
-# ============================================================
-with tab4:
-    def read_log(filename):
-        path = os.path.join("logs", filename)
-        if os.path.exists(path):
-            with open(path) as f:
-                lines = f.readlines()
-                return "".join(lines[-50:])  # Newest at bottom
-        return "Aguardando logs..."
-
-    @st.fragment(run_every=1)
-    def update_terminals():
-        t1, t2, t3, t4 = st.tabs(["🧠 SERVER", "🔵 FULL", "🟠 NOISY", "🟢 NON-IID"])
-        with t1:
-            st.markdown(f'<div class="terminal-container">{read_log("server.log")}</div>', unsafe_allow_html=True)
-        with t2:
-            st.markdown(f'<div class="terminal-container">{read_log("client-full.log")}</div>', unsafe_allow_html=True)
-        with t3:
-            st.markdown(f'<div class="terminal-container">{read_log("client-noisy.log")}</div>', unsafe_allow_html=True)
-        with t4:
-            st.markdown(f'<div class="terminal-container">{read_log("client-noniid.log")}</div>', unsafe_allow_html=True)
-
-    update_terminals()
-
-# ============================================================
-# TAB 4: Métricas de Treinamento
-# ============================================================
-with tab5:
-    @st.fragment(run_every=2)
-    def update_metrics():
+    if st.button("Comprimir e gerar no destino", type="primary"):
         try:
-            if not os.path.exists(DB_FILE):
-                st.info("⏳ Aguardando dados de treinamento...")
-                return
+            payload = call_api("/compress_text", {
+                "text": transfer_text,
+                "chunk_size": chunk_size,
+                "overlap": overlap,
+                "mode": mode,
+            })
+            generated = call_api("/generate_text", {"chunks": payload["chunks"]})
+            st.session_state.transfer_result = {"payload": payload, "generated": generated}
+        except Exception as exc:
+            st.error(f"Falha ao chamar API textual: {exc}")
 
-            conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    result = st.session_state.get("transfer_result")
+    if result:
+        payload = result["payload"]
+        generated = result["generated"]
+        meta1, meta2, meta3, meta4 = st.columns(4)
+        meta1.metric("Chunks", payload["num_chunks"])
+        meta2.metric("Latentes enviados", sum(len(chunk["latent"]) for chunk in payload["chunks"]))
+        meta3.metric("Modo", payload["mode"])
+        meta4.metric("Overlap", payload["overlap"])
 
-            # Client loss by round
-            try:
-                df = pd.read_sql(
-                    "SELECT round_number, node_id, loss FROM training_logs WHERE round_number > 0 ORDER BY round_number ASC",
-                    conn
-                )
-            except Exception:
-                st.info("⏳ Aguardando dados...")
-                conn.close()
-                return
-            
-            # Round metrics (global MSE/PSNR/SSIM)
-            try:
-                df_rounds = pd.read_sql(
-                    "SELECT round_number, global_mse, global_psnr, global_ssim FROM round_metrics ORDER BY round_number ASC",
-                    conn
-                )
-            except Exception:
-                df_rounds = pd.DataFrame()
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**Texto de origem**")
+            st.markdown(f"<div class='panel-box'>{transfer_text}</div>", unsafe_allow_html=True)
+        with right:
+            st.markdown("**Texto gerado no destino**")
+            st.markdown(f"<div class='panel-box'>{generated['text']}</div>", unsafe_allow_html=True)
 
-            conn.close()
+        chunk_rows = []
+        for chunk in payload["chunks"]:
+            chunk_rows.append({
+                "chunk_id": chunk["chunk_id"],
+                "source_text": chunk["source_text"],
+                "reconstructed_text": chunk["reconstructed_text"],
+                "latent_dim": len(chunk["latent"]),
+            })
+        st.subheader("Payload por chunk")
+        st.dataframe(pd.DataFrame(chunk_rows), use_container_width=True, hide_index=True)
 
-            if df.empty:
-                st.info("📊 Sem dados de treinamento ainda.")
-                return
+with tab_completion:
+    st.subheader("Completação textual")
+    if "completion_text" not in st.session_state:
+        sample, _ = sample_text()
+        st.session_state.completion_text = sample or "Digite um texto para mascarar e completar no destino."
 
-            # KPI Cards
-            st.subheader("📊 Resumo")
-            k1, k2, k3, k4 = st.columns(4)
-            
-            max_round = df['round_number'].max()
-            with k1:
-                st.metric("Rodada Atual", max_round)
-            
-            last_loss = df.groupby('node_id')['loss'].last()
-            with k2:
-                if 'client-full' in last_loss.index:
-                    st.metric("🔵 Loss Full", f"{last_loss['client-full']:.6f}")
-            with k3:
-                if 'client-noisy' in last_loss.index:
-                    st.metric("🟠 Loss Noisy", f"{last_loss['client-noisy']:.6f}")
-            with k4:
-                if 'client-noniid' in last_loss.index:
-                    st.metric("🟢 Loss Non-IID", f"{last_loss['client-noniid']:.6f}")
+    completion_text = st.text_area("Texto para completação", key="completion_text", height=220)
+    col_a, col_b, col_c = st.columns(3)
+    strategy = col_a.selectbox("Estratégia", ["truncate", "random"], format_func=lambda value: "Truncar fim" if value == "truncate" else "Mascarar aleatório")
+    mask_ratio = col_b.slider("Percentual mascarado", 0.1, 0.9, 0.5, step=0.1)
+    completion_chunk = col_c.slider("Chunk size", 20, MAX_MODEL_CHUNK, int(TEXT_CHUNK_SIZE), step=5)
 
-            # Loss curves by round (per client)
-            st.subheader("📉 Loss por Cliente (por Rodada)")
-            chart_data = df.pivot_table(index='round_number', columns='node_id', values='loss', aggfunc='mean')
-            # Rename columns for display
-            rename_map = {"client-full": "🔵 Full", "client-noisy": "🟠 Noisy", "client-noniid": "🟢 Non-IID"}
-            chart_data = chart_data.rename(columns=rename_map)
-            st.line_chart(chart_data, height=350)
-            
-            # Global model quality
-            if not df_rounds.empty:
-                st.subheader("🌐 Qualidade do Modelo Global")
-                g1, g2, g3 = st.columns(3)
-                with g1:
-                    st.metric("MSE Global (última)", f"{df_rounds['global_mse'].iloc[-1]:.6f}")
-                    st.line_chart(df_rounds.set_index('round_number')['global_mse'], height=250)
-                with g2:
-                    st.metric("PSNR Global (última)", f"{df_rounds['global_psnr'].iloc[-1]:.1f} dB")
-                    st.line_chart(df_rounds.set_index('round_number')['global_psnr'], height=250)
-                with g3:
-                    if 'global_ssim' in df_rounds.columns:
-                        st.metric("SSIM Global (última)", f"{df_rounds['global_ssim'].iloc[-1]:.4f}")
-                        st.line_chart(df_rounds.set_index('round_number')['global_ssim'], height=250)
+    if st.button("Completar texto"):
+        try:
+            result = call_api("/complete_text", {
+                "text": completion_text,
+                "strategy": strategy,
+                "mask_ratio": mask_ratio,
+                "chunk_size": completion_chunk,
+                "overlap": 0,
+            })
+            st.session_state.completion_result = result
+        except Exception as exc:
+            st.error(f"Falha ao completar texto: {exc}")
 
-        except Exception as e:
-            st.error(f"Erro: {e}")
+    completion_result = st.session_state.get("completion_result")
+    if completion_result:
+        orig_col, masked_col, done_col = st.columns(3)
+        orig_col.markdown("**Original**")
+        orig_col.markdown(f"<div class='panel-box'>{completion_text}</div>", unsafe_allow_html=True)
+        masked_col.markdown("**Texto enviado**")
+        masked_col.markdown(f"<div class='panel-box'>{completion_result['masked_text']}</div>", unsafe_allow_html=True)
+        done_col.markdown("**Texto completado**")
+        done_col.markdown(f"<div class='panel-box'>{completion_result['completed_text']}</div>", unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame(completion_result["chunks"]), use_container_width=True, hide_index=True)
 
-    update_metrics()
+with tab_logs:
+    @st.fragment(run_every=1)
+    def render_logs():
+        t1, t2, t3, t4 = st.tabs(["Servidor", "client-full", "client-noisy", "client-noniid"])
+        with t1:
+            st.markdown(f"<div class='terminal-container'>{read_log('server.log')}</div>", unsafe_allow_html=True)
+        with t2:
+            st.markdown(f"<div class='terminal-container'>{read_log('client-full.log')}</div>", unsafe_allow_html=True)
+        with t3:
+            st.markdown(f"<div class='terminal-container'>{read_log('client-noisy.log')}</div>", unsafe_allow_html=True)
+        with t4:
+            st.markdown(f"<div class='terminal-container'>{read_log('client-noniid.log')}</div>", unsafe_allow_html=True)
 
-# ============================================================
-# TAB 5: Histórico de Experimentos
-# ============================================================
-with tab6:
-    st.subheader("📈 Comparação de Experimentos por Cenário de Caos")
-    st.markdown("Carrega resultados exportados pelo `run_experiments.py` da pasta `results/`.")
-    
-    results_dir = "results"
-    
-    if not os.path.exists(results_dir):
-        st.info("📂 Nenhum resultado de experimento encontrado. Execute `python run_experiments.py` primeiro.")
+    render_logs()
+
+with tab_metrics:
+    df_logs = load_training_logs_db()
+    df_rounds = load_round_metrics_db()
+    if df_logs.empty:
+        st.info("Aguardando métricas de treinamento.")
     else:
-        csv_files = [f for f in os.listdir(results_dir) if f.endswith("_round_metrics.csv")]
-        
-        if not csv_files:
-            st.info("📂 Nenhum CSV de resultados encontrado. Execute `python run_experiments.py` primeiro.")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Rodada atual", int(df_logs["round_number"].max()))
+        last_loss = df_logs.groupby("node_id")["loss"].last()
+        k2.metric("Loss client-full", f"{last_loss.get('client-full', 0.0):.4f}")
+        k3.metric("Loss client-noisy", f"{last_loss.get('client-noisy', 0.0):.4f}")
+        k4.metric("Loss client-noniid", f"{last_loss.get('client-noniid', 0.0):.4f}")
+
+        st.subheader("Loss por cliente")
+        chart_data = df_logs.pivot_table(index="round_number", columns="node_id", values="loss", aggfunc="mean")
+        st.line_chart(chart_data, height=340)
+
+        if not df_rounds.empty:
+            a, b = st.columns(2)
+            a.metric("Global CE Loss", f"{df_rounds['global_celoss'].iloc[-1]:.4f}")
+            a.line_chart(df_rounds.set_index("round_number")["global_celoss"], height=260)
+            b.metric("Global Accuracy", f"{df_rounds['global_accuracy'].iloc[-1]:.1f}%")
+            b.line_chart(df_rounds.set_index("round_number")["global_accuracy"], height=260)
+
+with tab_exp:
+    st.subheader("Resultados exportados")
+    if not os.path.exists(RESULTS_DIR):
+        st.info("Nenhum resultado exportado encontrado.")
+    else:
+        metric_files = sorted(name for name in os.listdir(RESULTS_DIR) if name.endswith("_round_metrics.csv"))
+        if not metric_files:
+            st.info("Nenhum CSV de métricas encontrado em results/.")
         else:
-            # Load all scenarios
-            all_data = {}
-            for f in csv_files:
-                scenario = f.replace("_round_metrics.csv", "")
+            all_results = {}
+            for name in metric_files:
+                path = os.path.join(RESULTS_DIR, name)
                 try:
-                    df = pd.read_csv(os.path.join(results_dir, f))
-                    all_data[scenario] = df
+                    all_results[name.replace("_round_metrics.csv", "")] = load_round_metrics_csv(path)
                 except Exception:
-                    pass
-            
-            if all_data:
-                scenarios_found = list(all_data.keys())
-                selected = st.multiselect("Cenários:", scenarios_found, default=scenarios_found)
-                
-                if selected:
-                    # MSE comparison
-                    st.subheader("MSE Global por Cenário")
-                    mse_chart = pd.DataFrame()
-                    for s in selected:
-                        if s in all_data:
-                            df = all_data[s]
-                            mse_chart[s] = df.set_index('round_number')['global_mse']
-                    if not mse_chart.empty:
-                        st.line_chart(mse_chart, height=350)
-                    
-                    # PSNR comparison  
-                    st.subheader("PSNR Global por Cenário")
-                    psnr_chart = pd.DataFrame()
-                    for s in selected:
-                        if s in all_data:
-                            df = all_data[s]
-                            psnr_chart[s] = df.set_index('round_number')['global_psnr']
-                    if not psnr_chart.empty:
-                        st.line_chart(psnr_chart, height=350)
-                    
-                    # Summary table
-                    st.subheader("Tabela Comparativa")
-                    summary_rows = []
-                    for s in selected:
-                        if s in all_data:
-                            df = all_data[s]
-                            summary_rows.append({
-                                "Cenário": s,
-                                "MSE Final": f"{df['global_mse'].iloc[-1]:.4f}" if len(df) > 0 else "N/A",
-                                "PSNR Final (dB)": f"{df['global_psnr'].iloc[-1]:.1f}" if len(df) > 0 else "N/A",
-                                "Melhor MSE": f"{df['global_mse'].min():.4f}" if len(df) > 0 else "N/A",
-                                "Melhor PSNR (dB)": f"{df['global_psnr'].max():.1f}" if len(df) > 0 else "N/A",
-                                "Rodadas": len(df),
-                            })
-                    if summary_rows:
-                        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
-            
-            # Per-client loss comparison
-            log_files = [f for f in os.listdir(results_dir) if f.endswith("_training_logs.csv")]
-            if log_files:
-                st.divider()
-                st.subheader("Loss por Cliente (por Cenário)")
-                selected_scenario = st.selectbox("Cenário:", [f.replace("_training_logs.csv", "") for f in log_files])
-                path = os.path.join(results_dir, f"{selected_scenario}_training_logs.csv")
-                if os.path.exists(path):
-                    try:
-                        df_logs = pd.read_csv(path)
-                        chart = df_logs.pivot_table(index='round_number', columns='node_id', values='loss', aggfunc='mean')
-                        rename_map = {"client-full": "🔵 Full", "client-noisy": "🟠 Noisy", "client-noniid": "🟢 Non-IID"}
-                        chart = chart.rename(columns=rename_map)
-                        st.line_chart(chart, height=350)
-                    except Exception as e:
-                        st.error(f"Erro ao carregar: {e}")
+                    continue
+
+            selected = st.multiselect("Cenários", list(all_results.keys()), default=list(all_results.keys()))
+            if selected:
+                loss_chart = pd.DataFrame()
+                acc_chart = pd.DataFrame()
+                summary = []
+                for scenario in selected:
+                    df = all_results[scenario]
+                    loss_chart[scenario] = df.set_index("round_number")["global_celoss"]
+                    acc_chart[scenario] = df.set_index("round_number")["global_accuracy"]
+                    summary.append({
+                        "Cenário": scenario,
+                        "CE final": f"{df['global_celoss'].iloc[-1]:.4f}",
+                        "Accuracy final": f"{df['global_accuracy'].iloc[-1]:.1f}%",
+                        "Melhor CE": f"{df['global_celoss'].min():.4f}",
+                        "Melhor accuracy": f"{df['global_accuracy'].max():.1f}%",
+                        "Rodadas": len(df),
+                    })
+                st.line_chart(loss_chart, height=320)
+                st.line_chart(acc_chart, height=320)
+                st.dataframe(pd.DataFrame(summary), use_container_width=True, hide_index=True)

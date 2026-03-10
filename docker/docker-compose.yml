@@ -50,7 +50,7 @@ services:
       - fl-network
 
   # ============================
-  # Cliente Non-IID (dados heterogêneos - apenas dígitos 0-3)
+  # Cliente Non-IID (dados heterogêneos - subconjunto textual)
   # ============================
   client-noniid:
     image: fl-app-image:latest

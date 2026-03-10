@@ -55,7 +55,7 @@ def reset_db():
         os.remove(DB_FILE)
     conn = sqlite3.connect(DB_FILE)
     conn.execute("CREATE TABLE IF NOT EXISTS training_logs (timestamp TEXT, node_id TEXT, bytes_sent INTEGER, loss REAL, round_number INTEGER)")
-    conn.execute("CREATE TABLE IF NOT EXISTS round_metrics (round_number INTEGER, global_mse REAL, global_psnr REAL, timestamp TEXT, chaos_scenario TEXT, global_ssim REAL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS round_metrics (round_number INTEGER, global_celoss REAL, global_accuracy REAL, timestamp TEXT, chaos_scenario TEXT)")
     conn.commit()
     conn.close()
 
@@ -80,7 +80,7 @@ def export_results(scenario_name):
     path_rounds = os.path.join(RESULTS_DIR, f"{scenario_name}_round_metrics.csv")
     with open(path_rounds, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["round_number", "global_mse", "global_psnr", "timestamp", "chaos_scenario", "global_ssim"])
+        writer.writerow(["round_number", "global_celoss", "global_accuracy", "timestamp", "chaos_scenario"])
         writer.writerows(df)
 
     # Export training_logs

@@ -5,167 +5,152 @@ import math
 def get_device():
     return torch.device("cpu")
 
-
 def snr_to_noise_std(snr_db):
     """Converte SNR em dB para desvio padrão do ruído AWGN"""
     return 1.0 / math.sqrt(10 ** (snr_db / 10))
 
-
-class ImageAutoencoder(nn.Module):
+class TextAutoencoder(nn.Module):
     """
-    Autoencoder Convolucional para compressão e reconstrução de imagens.
-    Encoder: Conv2d → Gargalo (32 dims) → Decoder: ConvTranspose2d
-    Projetado para imagens MNIST (1x28x28).
+    Autoencoder Semântico para Textos Focado em Compressão Extrema.
+    Encoder: Embedding → Simple Recurrent/Linear → Gargalo Latente (Assunto)
+    Decoder: Linear → Vocabulário
     
-    Compressão: 784 pixels → 32 dimensões latentes (96% de compressão)
+    Atenção: Para testes simples de FedAvg vamos usar uma estrutura MLP pós-embedding 
+    e pooling para atingir a compressão desejada de forma rápida.
     """
-    def __init__(self, latent_dim=32):
-        super(ImageAutoencoder, self).__init__()
+    def __init__(self, vocab_size, seq_len=50, embed_dim=64, hidden_dim=128, latent_dim=32):
+        super(TextAutoencoder, self).__init__()
+        self.vocab_size = vocab_size
+        self.seq_len = seq_len
         self.latent_dim = latent_dim
         
-        # --- ENCODER (Comprime a imagem) ---
-        self.encoder_conv = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),   # 1x28x28 → 32x28x28
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),                            # 32x28x28 → 32x14x14
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),   # 32x14x14 → 64x14x14
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),                            # 64x14x14 → 64x7x7
-        )
+        # --- ENCODER ---
+        self.embedding = nn.Embedding(num_embeddings=vocab_size, embedding_dim=embed_dim)
         
-        # Camadas densas do encoder
+        # Após a view/flatten da sequência (seq_len * embed_dim)
         self.encoder_fc = nn.Sequential(
-            nn.Linear(64 * 7 * 7, 256),
+            nn.Linear(seq_len * embed_dim, hidden_dim * 2),
             nn.ReLU(),
-            nn.Linear(256, latent_dim),  # Gargalo: 32 dimensões
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, latent_dim) # Gargalo Compressivo (Assunto)
         )
         
-        # --- DECODER (Reconstrói a imagem) ---
+        # --- DECODER ---
         self.decoder_fc = nn.Sequential(
-            nn.Linear(latent_dim, 256),
+            nn.Linear(latent_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(256, 64 * 7 * 7),
+            nn.Linear(hidden_dim, hidden_dim * 2),
             nn.ReLU(),
+            nn.Linear(hidden_dim * 2, seq_len * embed_dim),
+            nn.ReLU()
         )
         
-        self.decoder_conv = nn.Sequential(
-            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),  # 64x7x7 → 32x14x14
-            nn.ReLU(),
-            nn.ConvTranspose2d(32, 1, kernel_size=3, stride=2, padding=1, output_padding=1),   # 32x14x14 → 1x28x28
-            nn.Sigmoid(),  # Saída normalizada [0, 1]
-        )
-    
+        # Projeção final para o tamanho do vocabulário, token a token
+        self.output_projection = nn.Linear(embed_dim, vocab_size)
+
     def encode(self, x):
-        """Comprime imagem para vetor latente de 32 dimensões"""
-        x = self.encoder_conv(x)
-        x = x.view(x.size(0), -1)  # Flatten
-        z = self.encoder_fc(x)
+        """Comprime a sequência de tokens no vetor latente"""
+        # x.shape = (batch_size, seq_len)
+        embedded = self.embedding(x) # (batch_size, seq_len, embed_dim)
+        flattened = embedded.view(embedded.size(0), -1) # (batch_size, seq_len * embed_dim)
+        z = self.encoder_fc(flattened) # (batch_size, latent_dim)
         return z
-    
+
     def decode(self, z):
-        """Reconstrói imagem 28x28 a partir do vetor latente"""
-        x = self.decoder_fc(z)
-        x = x.view(x.size(0), 64, 7, 7)
-        x = self.decoder_conv(x)
-        return x
-    
+        """Reconstrói a partir do vetor latente"""
+        # (batch_size, seq_len * embed_dim)
+        decoded_flat = self.decoder_fc(z) 
+        
+        # Re-shape back para sequência (batch_size, seq_len, embed_dim)
+        decoded_seq = decoded_flat.view(decoded_flat.size(0), self.seq_len, -1)
+        
+        # Projeta cada posição na dimensão do vocabulário (batch_size, seq_len, vocab_size)
+        logits = self.output_projection(decoded_seq)
+        return logits
+
     def forward(self, x, snr_db=None):
         z = self.encode(x)
+        
+        # Injeção de Ruído AWGN no Canal Físico
         if snr_db is not None and self.training:
             noise_std = snr_to_noise_std(snr_db)
             z = z + torch.randn_like(z) * noise_std
-        reconstructed = self.decode(z)
-        return reconstructed
+            
+        logits = self.decode(z)
+        return logits
 
 
-class ImageVAE(nn.Module):
+class TextVAE(nn.Module):
     """
-    Variational Autoencoder Convolucional para comunicação semântica generativa.
-    Encoder: Conv2d → μ, log(σ²) → Reparametrização → Decoder: ConvTranspose2d
-    
-    Diferença do AE: espaço latente é distribuição N(μ, σ²), permitindo geração.
-    Loss = MSE + β · KL(q(z|x) || p(z)), onde p(z) = N(0, I)
+    Variational Autoencoder para Textos Generativos (Semântico).
     """
-    def __init__(self, latent_dim=32):
-        super(ImageVAE, self).__init__()
+    def __init__(self, vocab_size, seq_len=50, embed_dim=64, hidden_dim=128, latent_dim=32):
+        super(TextVAE, self).__init__()
+        self.vocab_size = vocab_size
+        self.seq_len = seq_len
         self.latent_dim = latent_dim
         
-        # --- ENCODER (mesmo backbone do AE) ---
-        self.encoder_conv = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-        )
-        self.encoder_fc = nn.Sequential(
-            nn.Linear(64 * 7 * 7, 256),
-            nn.ReLU(),
-        )
-        # Duas cabeças: μ e log(σ²)
-        self.fc_mu = nn.Linear(256, latent_dim)
-        self.fc_logvar = nn.Linear(256, latent_dim)
+        self.embedding = nn.Embedding(num_embeddings=vocab_size, embedding_dim=embed_dim)
         
-        # --- DECODER (idêntico ao AE) ---
+        self.encoder_fc = nn.Sequential(
+            nn.Linear(seq_len * embed_dim, hidden_dim * 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+        )
+        # Cabeças do VAE
+        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        
         self.decoder_fc = nn.Sequential(
-            nn.Linear(latent_dim, 256),
+            nn.Linear(latent_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(256, 64 * 7 * 7),
+            nn.Linear(hidden_dim, hidden_dim * 2),
             nn.ReLU(),
+            nn.Linear(hidden_dim * 2, seq_len * embed_dim),
+            nn.ReLU()
         )
-        self.decoder_conv = nn.Sequential(
-            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(32, 1, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.Sigmoid(),
-        )
-    
+        
+        self.output_projection = nn.Linear(embed_dim, vocab_size)
+
     def encode(self, x):
-        """Retorna μ e log(σ²) da distribuição posterior q(z|x)"""
-        x = self.encoder_conv(x)
-        x = x.view(x.size(0), -1)
-        h = self.encoder_fc(x)
+        embedded = self.embedding(x)
+        flattened = embedded.view(embedded.size(0), -1)
+        h = self.encoder_fc(flattened)
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
         return mu, logvar
-    
+
     def reparameterize(self, mu, logvar):
-        """Trick de reparametrização: z = μ + σ · ε, ε ~ N(0, I)"""
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
-    
+
     def decode(self, z):
-        """Reconstrói imagem 28x28 a partir do vetor latente"""
-        x = self.decoder_fc(z)
-        x = x.view(x.size(0), 64, 7, 7)
-        x = self.decoder_conv(x)
-        return x
-    
+        decoded_flat = self.decoder_fc(z)
+        decoded_seq = decoded_flat.view(decoded_flat.size(0), self.seq_len, -1)
+        logits = self.output_projection(decoded_seq)
+        return logits
+
     def forward(self, x, snr_db=None):
         mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar)
+        
         if snr_db is not None and self.training:
             noise_std = snr_to_noise_std(snr_db)
             z = z + torch.randn_like(z) * noise_std
-        reconstructed = self.decode(z)
-        return reconstructed, mu, logvar
-    
-    def generate(self, num_samples=16):
-        """Gera imagens novas amostrando z ~ N(0, I)"""
-        z = torch.randn(num_samples, self.latent_dim)
-        with torch.no_grad():
-            return self.decode(z)
-    
+            
+        logits = self.decode(z)
+        return logits, mu, logvar
+
     @staticmethod
     def kl_divergence(mu, logvar):
-        """KL(q(z|x) || N(0, I)) = -0.5 * Σ(1 + log(σ²) - μ² - σ²)"""
         return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.size(0)
 
 
-def get_model(model_type="autoencoder", latent_dim=32):
-    """Factory: retorna AE ou VAE conforme config"""
+def get_model(model_type="autoencoder", vocab_size=10000, seq_len=50, latent_dim=32):
+    """Retorna TextAE ou TextVAE"""
     if model_type == "vae":
-        return ImageVAE(latent_dim=latent_dim)
-    return ImageAutoencoder(latent_dim=latent_dim)
+        return TextVAE(vocab_size=vocab_size, seq_len=seq_len, latent_dim=latent_dim)
+    return TextAutoencoder(vocab_size=vocab_size, seq_len=seq_len, latent_dim=latent_dim)

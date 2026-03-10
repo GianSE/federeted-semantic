@@ -1,6 +1,6 @@
 """
 Treinamento centralizado (baseline) para comparação com FL.
-Treina o mesmo modelo com todos os dados em um único nó.
+Treina o mesmo modelo textual com todos os dados em um único nó.
 
 Uso:
     python train_centralized.py                    # AE padrão
@@ -15,29 +15,27 @@ import csv
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
 
-from model_utils import ImageAutoencoder, ImageVAE, get_model
-from image_utils import load_mnist, get_random_batch, compute_mse, compute_psnr, compute_ssim
-from config import LATENT_DIM, BATCH_SIZE, LEARNING_RATE
+from model_utils import TextVAE, get_model
+from text_utils import load_text_dataset, get_random_batch_text, compute_accuracy, compute_cross_entropy, MAX_SEQ_LEN, MAX_VOCAB_SIZE
+from config import LATENT_DIM, BATCH_SIZE, LEARNING_RATE, LOCAL_EPOCHS
 
 RESULTS_DIR = "results"
 ROUNDS = int(os.environ.get("EXPERIMENT_ROUNDS", "30"))
-LOCAL_EPOCHS = 5
 
 
 def train_centralized(model_type="autoencoder", snr_db=None, rounds=ROUNDS):
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
-    model = get_model(model_type, LATENT_DIM)
+    model = get_model(model_type, vocab_size=MAX_VOCAB_SIZE, seq_len=MAX_SEQ_LEN, latent_dim=LATENT_DIM)
     is_vae = model_type == "vae"
-    tag = "VAE" if is_vae else "AE"
+    tag = "TextVAE" if is_vae else "TextAE"
 
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    criterion = nn.MSELoss()
+    criterion = nn.CrossEntropyLoss()
 
-    dataset_train = load_mnist(train=True)
-    dataset_test = load_mnist(train=False)
+    dataset_train, _ = load_text_dataset(train=True)
+    dataset_test, _ = load_text_dataset(train=False)
 
     print(f"🏋️ Treinamento Centralizado — {tag}")
     print(f"   Rodadas: {rounds} | Épocas/rodada: {LOCAL_EPOCHS} | Batch: {BATCH_SIZE}")
@@ -49,35 +47,34 @@ def train_centralized(model_type="autoencoder", snr_db=None, rounds=ROUNDS):
 
     for r in range(1, rounds + 1):
         model.train()
-        images, _ = get_random_batch(dataset_train, batch_size=BATCH_SIZE)
+        inputs, targets = get_random_batch_text(dataset_train, batch_size=BATCH_SIZE)
 
         for _ in range(LOCAL_EPOCHS):
             optimizer.zero_grad()
             if is_vae:
-                recon, mu, logvar = model(images, snr_db=snr_db)
-                recon_loss = criterion(recon, images)
-                kl_loss = ImageVAE.kl_divergence(mu, logvar)
+                logits, mu, logvar = model(inputs, snr_db=snr_db)
+                recon_loss = criterion(logits.view(-1, logits.size(-1)), targets.view(-1))
+                kl_loss = TextVAE.kl_divergence(mu, logvar)
                 loss = recon_loss + kl_loss
             else:
-                recon = model(images, snr_db=snr_db)
-                loss = criterion(recon, images)
+                logits = model(inputs, snr_db=snr_db)
+                loss = criterion(logits.view(-1, logits.size(-1)), targets.view(-1))
             loss.backward()
             optimizer.step()
 
         # Avaliação
         model.eval()
-        test_images, _ = get_random_batch(dataset_test, batch_size=100)
+        test_inputs, test_targets = get_random_batch_text(dataset_test, batch_size=100)
         with torch.no_grad():
-            output = model(test_images)
-            test_recon = output[0] if isinstance(output, tuple) else output
+            output = model(test_inputs)
+            test_logits = output[0] if isinstance(output, tuple) else output
 
-        mse = compute_mse(test_images, test_recon)
-        psnr = compute_psnr(test_images, test_recon)
-        ssim = compute_ssim(test_images, test_recon)
-        metrics.append({"round": r, "mse": mse, "psnr": psnr, "ssim": ssim})
+        ce_loss = compute_cross_entropy(test_targets, test_logits)
+        accuracy = compute_accuracy(test_targets, test_logits) * 100.0
+        metrics.append({"round": r, "ce_loss": ce_loss, "accuracy": accuracy})
 
         elapsed = time.time() - start
-        print(f"\r  Rodada {r}/{rounds} | MSE={mse:.6f} | PSNR={psnr:.1f} dB | SSIM={ssim:.4f} | {elapsed:.0f}s", end="", flush=True)
+        print(f"\r  Rodada {r}/{rounds} | CE Loss={ce_loss:.4f} | Accuracy={accuracy:.1f}% | {elapsed:.0f}s", end="", flush=True)
 
     print()
 
@@ -92,21 +89,20 @@ def train_centralized(model_type="autoencoder", snr_db=None, rounds=ROUNDS):
     # Exportar CSV
     csv_path = os.path.join(RESULTS_DIR, f"Centralizado{suffix}_round_metrics.csv")
     with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["round_number", "global_mse", "global_psnr", "timestamp", "chaos_scenario", "global_ssim"])
+        writer = csv.DictWriter(f, fieldnames=["round_number", "global_celoss", "global_accuracy", "timestamp", "chaos_scenario"])
         writer.writeheader()
         for m in metrics:
             writer.writerow({
                 "round_number": m["round"],
-                "global_mse": m["mse"],
-                "global_psnr": m["psnr"],
+                "global_celoss": m["ce_loss"],
+                "global_accuracy": m["accuracy"],
                 "timestamp": "",
                 "chaos_scenario": f"Centralizado{suffix}",
-                "global_ssim": m["ssim"],
             })
     print(f"📁 CSV salvo: {csv_path}")
 
     final = metrics[-1]
-    print(f"\n✅ Centralizado {tag} finalizado: MSE={final['mse']:.6f} | PSNR={final['psnr']:.1f} dB | SSIM={final['ssim']:.4f}")
+    print(f"\n✅ Centralizado {tag} finalizado: CE Loss={final['ce_loss']:.4f} | Accuracy={final['accuracy']:.1f}%")
     return metrics
 
 
