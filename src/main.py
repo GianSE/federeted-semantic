@@ -6,7 +6,7 @@ import json
 from server import app as flask_app
 from client import train_and_upload
 from model_utils import get_model
-from image_utils import load_mnist, load_mnist_filtered, get_random_batch
+from image_utils import load_mnist, load_mnist_filtered
 from config import NONIID_LABELS, MODEL_TYPE, LATENT_DIM, VAE_BETA, CHANNEL_SNR_DB
 
 def init_db():
@@ -70,12 +70,9 @@ if __name__ == "__main__":
                         model.load_state_dict(state)
                     except Exception:
                         pass
-                
-                # Pega batch aleatório de imagens
-                images, labels = get_random_batch(dataset, batch_size=32)
-                
+
                 # Treina e envia pesos
-                train_and_upload(model, images, server_url, node_id,
+                train_and_upload(model, dataset, server_url, node_id,
                                 model_type=MODEL_TYPE, vae_beta=VAE_BETA,
                                 channel_snr_db=channel_snr)
                 

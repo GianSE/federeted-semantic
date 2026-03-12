@@ -32,6 +32,7 @@ RESULTS_DIR = "results"
 FIGURES_DIR = os.environ.get("FIGURES_DIR", os.path.join("..", "paper", "figures"))
 TABLES_DIR = os.environ.get("TABLES_DIR", os.path.join("..", "paper", "tables"))
 DB_FILE = "metrics.db"
+MODEL_CHECKPOINT = os.environ.get("MODEL_CHECKPOINT", "global_model.pth")
 
 SCENARIOS = ["Normal", "Leve", "Moderado", "Severo"]
 SCENARIO_COLORS = {"Normal": "#2196F3", "Leve": "#4CAF50", "Moderado": "#FF9800", "Severo": "#F44336"}
@@ -54,6 +55,16 @@ def ensure_dirs():
     os.makedirs(FIGURES_DIR, exist_ok=True)
     os.makedirs(TABLES_DIR, exist_ok=True)
     os.makedirs(RESULTS_DIR, exist_ok=True)
+
+
+def load_checkpoint(model, checkpoint_path):
+    if not os.path.exists(checkpoint_path):
+        print(f"  ⚠️ Checkpoint não encontrado: {checkpoint_path}. Pulando.")
+        return False
+
+    model.load_state_dict(torch.load(checkpoint_path, map_location="cpu", weights_only=True))
+    print(f"  ℹ️ Checkpoint: {os.path.abspath(checkpoint_path)}")
+    return True
 
 
 # ============================================================
@@ -173,7 +184,7 @@ def generate_fig_convergence():
 # ============================================================
 # Figure 2: Reconstruction quality (original vs reconstructed)
 # ============================================================
-def generate_fig_reconstruction():
+def generate_fig_reconstruction(checkpoint_path):
     print("📊 Gerando fig_reconstruction.png...")
     
     try:
@@ -184,12 +195,9 @@ def generate_fig_reconstruction():
         print("  ⚠️ Imports falham. Pulando.")
         return
     
-    if not os.path.exists("global_model.pth"):
-        print("  ⚠️ global_model.pth não encontrado. Pulando.")
-        return
-    
     model = get_model(MODEL_TYPE, LATENT_DIM)
-    model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
+    if not load_checkpoint(model, checkpoint_path):
+        return
     model.eval()
     
     dataset = load_mnist(train=False)
@@ -236,7 +244,11 @@ def generate_fig_reconstruction():
     axes[0, 0].set_ylabel("Original", fontsize=12, rotation=0, labelpad=60, va='center')
     axes[1, 0].set_ylabel("Reconstruído", fontsize=12, rotation=0, labelpad=60, va='center')
     
-    fig.suptitle("Reconstrução Semântica: 784 pixels → 32 valores latentes → 784 pixels", fontsize=13, y=1.02)
+    fig.suptitle(
+        f"Reconstrução Semântica: 784 pixels → {LATENT_DIM} valores latentes → 784 pixels\nCheckpoint: {os.path.basename(checkpoint_path)}",
+        fontsize=13,
+        y=1.05,
+    )
     fig.tight_layout()
     
     path = os.path.join(FIGURES_DIR, "fig_reconstruction.png")
@@ -297,7 +309,7 @@ def generate_tab_reconstruction(model, dataset):
 # ============================================================
 # Figure 3: Image completion (original | masked | completed)
 # ============================================================
-def generate_fig_completion():
+def generate_fig_completion(checkpoint_path):
     print("📊 Gerando fig_completion.png...")
     
     try:
@@ -309,12 +321,9 @@ def generate_fig_completion():
         print("  ⚠️ Imports falham. Pulando.")
         return
     
-    if not os.path.exists("global_model.pth"):
-        print("  ⚠️ global_model.pth não encontrado. Pulando.")
-        return
-    
     model = get_model(MODEL_TYPE, LATENT_DIM)
-    model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
+    if not load_checkpoint(model, checkpoint_path):
+        return
     model.eval()
     
     dataset = load_mnist(train=False)
@@ -356,7 +365,11 @@ def generate_fig_completion():
     for i, title in enumerate(col_titles):
         axes[0, i].set_title(title, fontsize=12, fontweight='bold')
     
-    fig.suptitle(f"Completação de Imagem Parcial (Dígito {label})", fontsize=14, y=1.02)
+    fig.suptitle(
+        f"Completação de Imagem Parcial (Dígito {label})\nCheckpoint: {os.path.basename(checkpoint_path)}",
+        fontsize=14,
+        y=1.05,
+    )
     fig.tight_layout()
     
     path = os.path.join(FIGURES_DIR, "fig_completion.png")
@@ -521,17 +534,26 @@ def generate_analysis():
 # ============================================================
 def main():
     ensure_dirs()
-    
-    live_mode = "--live" in sys.argv
+
+    args = sys.argv[1:]
+    live_mode = "--live" in args
+    checkpoint_path = MODEL_CHECKPOINT
+
+    if "--checkpoint" in args:
+        idx = args.index("--checkpoint")
+        if idx + 1 >= len(args):
+            raise SystemExit("Uso: python generate_figures.py [--live] [--checkpoint CAMINHO_DO_MODELO]")
+        checkpoint_path = args[idx + 1]
     
     print("=" * 60)
     print("📊 GERADOR DE FIGURAS E TABELAS")
     print(f"   Modo: {'Live (metrics.db)' if live_mode else 'CSVs (results/)'}")
+    print(f"   Checkpoint: {checkpoint_path}")
     print("=" * 60)
     
     generate_fig_convergence()
-    generate_fig_reconstruction()
-    generate_fig_completion()
+    generate_fig_reconstruction(checkpoint_path)
+    generate_fig_completion(checkpoint_path)
     generate_fig_chaos()
     generate_analysis()
     

@@ -16,14 +16,40 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+from torch.utils.data import DataLoader
 
-from model_utils import ImageAutoencoder, ImageVAE, get_model
-from image_utils import load_mnist, get_random_batch, compute_mse, compute_psnr, compute_ssim
-from config import LATENT_DIM, BATCH_SIZE, LEARNING_RATE
+from model_utils import ImageVAE, get_model
+from image_utils import load_mnist, compute_ssim
+from config import LATENT_DIM, BATCH_SIZE, LEARNING_RATE, LOCAL_EPOCHS, MAX_BATCHES_PER_EPOCH, TEST_BATCH_SIZE
 
 RESULTS_DIR = "results"
 ROUNDS = int(os.environ.get("EXPERIMENT_ROUNDS", "30"))
-LOCAL_EPOCHS = 5
+
+
+def evaluate_model(model, data_loader):
+    total_sq_error = 0.0
+    total_pixels = 0
+    total_ssim = 0.0
+    total_images = 0
+
+    model.eval()
+    with torch.no_grad():
+        for images, _ in data_loader:
+            output = model(images)
+            reconstructed = output[0] if isinstance(output, tuple) else output
+            diff = images - reconstructed
+
+            total_sq_error += torch.sum(diff * diff).item()
+            total_pixels += diff.numel()
+
+            batch_size = images.size(0)
+            total_images += batch_size
+            total_ssim += compute_ssim(images, reconstructed) * batch_size
+
+    mse = total_sq_error / total_pixels if total_pixels else 0.0
+    psnr = float("inf") if mse == 0 else 10 * np.log10(1.0 / mse)
+    ssim = total_ssim / total_images if total_images else 0.0
+    return mse, psnr, ssim
 
 
 def train_centralized(model_type="autoencoder", snr_db=None, rounds=ROUNDS):
@@ -38,9 +64,13 @@ def train_centralized(model_type="autoencoder", snr_db=None, rounds=ROUNDS):
 
     dataset_train = load_mnist(train=True)
     dataset_test = load_mnist(train=False)
+    train_loader = DataLoader(dataset_train, batch_size=BATCH_SIZE, shuffle=True)
+    test_loader = DataLoader(dataset_test, batch_size=TEST_BATCH_SIZE, shuffle=False)
+    max_batches = MAX_BATCHES_PER_EPOCH if MAX_BATCHES_PER_EPOCH > 0 else None
 
     print(f"🏋️ Treinamento Centralizado — {tag}")
     print(f"   Rodadas: {rounds} | Épocas/rodada: {LOCAL_EPOCHS} | Batch: {BATCH_SIZE}")
+    print(f"   Batches/época: {max_batches or 'todos'}")
     if snr_db is not None:
         print(f"   Canal AWGN: SNR={snr_db} dB")
 
@@ -49,35 +79,34 @@ def train_centralized(model_type="autoencoder", snr_db=None, rounds=ROUNDS):
 
     for r in range(1, rounds + 1):
         model.train()
-        images, _ = get_random_batch(dataset_train, batch_size=BATCH_SIZE)
+        train_losses = []
 
         for _ in range(LOCAL_EPOCHS):
-            optimizer.zero_grad()
-            if is_vae:
-                recon, mu, logvar = model(images, snr_db=snr_db)
-                recon_loss = criterion(recon, images)
-                kl_loss = ImageVAE.kl_divergence(mu, logvar)
-                loss = recon_loss + kl_loss
-            else:
-                recon = model(images, snr_db=snr_db)
-                loss = criterion(recon, images)
-            loss.backward()
-            optimizer.step()
+            for batch_idx, (images, _) in enumerate(train_loader, start=1):
+                if max_batches is not None and batch_idx > max_batches:
+                    break
+
+                optimizer.zero_grad()
+                if is_vae:
+                    recon, mu, logvar = model(images, snr_db=snr_db)
+                    recon_loss = criterion(recon, images)
+                    kl_loss = ImageVAE.kl_divergence(mu, logvar)
+                    loss = recon_loss + kl_loss
+                else:
+                    recon = model(images, snr_db=snr_db)
+                    loss = criterion(recon, images)
+
+                loss.backward()
+                optimizer.step()
+                train_losses.append(loss.item())
 
         # Avaliação
-        model.eval()
-        test_images, _ = get_random_batch(dataset_test, batch_size=100)
-        with torch.no_grad():
-            output = model(test_images)
-            test_recon = output[0] if isinstance(output, tuple) else output
-
-        mse = compute_mse(test_images, test_recon)
-        psnr = compute_psnr(test_images, test_recon)
-        ssim = compute_ssim(test_images, test_recon)
+        mse, psnr, ssim = evaluate_model(model, test_loader)
         metrics.append({"round": r, "mse": mse, "psnr": psnr, "ssim": ssim})
 
         elapsed = time.time() - start
-        print(f"\r  Rodada {r}/{rounds} | MSE={mse:.6f} | PSNR={psnr:.1f} dB | SSIM={ssim:.4f} | {elapsed:.0f}s", end="", flush=True)
+        avg_loss = float(np.mean(train_losses)) if train_losses else 0.0
+        print(f"\r  Rodada {r}/{rounds} | Loss={avg_loss:.6f} | MSE={mse:.6f} | PSNR={psnr:.1f} dB | SSIM={ssim:.4f} | {elapsed:.0f}s", end="", flush=True)
 
     print()
 

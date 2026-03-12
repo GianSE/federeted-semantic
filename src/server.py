@@ -6,9 +6,12 @@ import os
 import json
 import time
 from datetime import datetime
-from config import REQUIRED_CLIENTS, CHAOS_SCENARIO, TEST_BATCH_SIZE, ROUND_TIMEOUT, MODEL_TYPE, LATENT_DIM
+from torch.utils.data import DataLoader
+from config import REQUIRED_CLIENTS, CHAOS_SCENARIO, TEST_BATCH_SIZE, ROUND_TIMEOUT, MODEL_TYPE, LATENT_DIM, MODEL_INIT_SEED
 
 app = Flask(__name__)
+
+GLOBAL_MODEL_PATH = "global_model.pth"
 
 # Buffer de pesos: dicionário garante apenas o último envio de cada cliente
 round_buffer = {}
@@ -25,6 +28,51 @@ def log_terminal(msg):
     print(formatted_msg, flush=True)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(formatted_msg + "\n")
+
+
+def initialize_global_model(force_reset=False):
+    from model_utils import get_model
+
+    if os.path.exists(GLOBAL_MODEL_PATH) and not force_reset:
+        return False
+
+    previous_state = torch.random.get_rng_state()
+    torch.manual_seed(MODEL_INIT_SEED)
+    model = get_model(MODEL_TYPE, LATENT_DIM)
+    torch.save(model.state_dict(), GLOBAL_MODEL_PATH)
+    torch.random.set_rng_state(previous_state)
+
+    reason = "resetado" if force_reset else "inicializado"
+    log_terminal(
+        f"🧠 Modelo global {reason} com seed fixa {MODEL_INIT_SEED} em '{GLOBAL_MODEL_PATH}'."
+    )
+    return True
+
+
+def evaluate_model(model, data_loader):
+    total_sq_error = 0.0
+    total_pixels = 0
+    total_ssim = 0.0
+    total_images = 0
+
+    model.eval()
+    with torch.no_grad():
+        for images, _ in data_loader:
+            output = model(images)
+            reconstructed = output[0] if isinstance(output, tuple) else output
+            diff = images - reconstructed
+
+            total_sq_error += torch.sum(diff * diff).item()
+            total_pixels += diff.numel()
+
+            batch_size = images.size(0)
+            total_images += batch_size
+            total_ssim += compute_ssim(images, reconstructed) * batch_size
+
+    mse = total_sq_error / total_pixels if total_pixels else 0.0
+    psnr = float("inf") if mse == 0 else 10 * np.log10(1.0 / mse)
+    ssim = total_ssim / total_images if total_images else 0.0
+    return mse, psnr, ssim
 
 def reconstruct_weights(partial_weights, node_id):
     """Reconstrói pesos comprimidos (Top-K) substituindo NaN pela média"""
@@ -100,25 +148,16 @@ def evaluate_global_model():
     """Avalia o modelo global em imagens de teste e retorna MSE, PSNR e SSIM"""
     try:
         from model_utils import get_model
-        from image_utils import load_mnist, get_random_batch, compute_mse, compute_psnr, compute_ssim
+        from image_utils import load_mnist, compute_ssim
+
+        initialize_global_model(force_reset=False)
         
         model = get_model(MODEL_TYPE, LATENT_DIM)
-        model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
-        model.eval()
+        model.load_state_dict(torch.load(GLOBAL_MODEL_PATH, map_location="cpu", weights_only=True))
         
         dataset = load_mnist(train=False)
-        images, _ = get_random_batch(dataset, batch_size=TEST_BATCH_SIZE)
-        
-        with torch.no_grad():
-            output = model(images)
-            if isinstance(output, tuple):  # VAE retorna (recon, mu, logvar)
-                reconstructed = output[0]
-            else:
-                reconstructed = output
-        
-        mse = compute_mse(images, reconstructed)
-        psnr = compute_psnr(images, reconstructed)
-        ssim = compute_ssim(images, reconstructed)
+        test_loader = DataLoader(dataset, batch_size=TEST_BATCH_SIZE, shuffle=False)
+        mse, psnr, ssim = evaluate_model(model, test_loader)
         return mse, psnr, ssim
     except Exception as e:
         log_terminal(f"⚠️ Erro na avaliação: {e}")
@@ -139,7 +178,7 @@ def aggregate_weights():
             tensors = [torch.tensor(client_weights[key]) for client_weights in round_buffer.values()]
             new_state_dict[key] = torch.mean(torch.stack(tensors), dim=0)
         
-        torch.save(new_state_dict, "global_model.pth")
+        torch.save(new_state_dict, GLOBAL_MODEL_PATH)
         
         log_terminal(f"💾 Modelo Global salvo! [Rodada {current_round}]")
         
@@ -169,8 +208,9 @@ def reconstruct_image():
         latent = torch.tensor(data['latent'], dtype=torch.float32).unsqueeze(0)
         
         model = get_model(MODEL_TYPE, LATENT_DIM)
-        if os.path.exists("global_model.pth"):
-            model.load_state_dict(torch.load("global_model.pth", map_location="cpu"))
+        initialize_global_model(force_reset=False)
+        if os.path.exists(GLOBAL_MODEL_PATH):
+            model.load_state_dict(torch.load(GLOBAL_MODEL_PATH, map_location="cpu"))
         model.eval()
         
         with torch.no_grad():
@@ -201,8 +241,9 @@ def complete_image():
             partial = partial.unsqueeze(0)
         
         model = get_model(MODEL_TYPE, LATENT_DIM)
-        if os.path.exists("global_model.pth"):
-            model.load_state_dict(torch.load("global_model.pth", map_location="cpu"))
+        initialize_global_model(force_reset=False)
+        if os.path.exists(GLOBAL_MODEL_PATH):
+            model.load_state_dict(torch.load(GLOBAL_MODEL_PATH, map_location="cpu"))
         model.eval()
         
         with torch.no_grad():
@@ -225,7 +266,8 @@ def reset_round():
     round_buffer = {}
     current_round = 0
     round_start_time = None
-    log_terminal("🔄 Round counter e buffer resetados.")
+    initialize_global_model(force_reset=True)
+    log_terminal("🔄 Round counter, buffer e modelo global resetados.")
     return jsonify({"status": "reset", "round": 0}), 200
 
 def log_to_db(node_id, bytes_sent, loss, round_number):
@@ -255,4 +297,5 @@ def log_round_metrics(round_number, global_mse, global_psnr, global_ssim=None):
 
 if __name__ == "__main__":
     with open(LOG_FILE, "w", encoding="utf-8") as f: f.write("=== SERVIDOR FL INICIADO ===\n")
+    initialize_global_model(force_reset=False)
     app.run(host='0.0.0.0', port=5000)

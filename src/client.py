@@ -4,9 +4,11 @@ import requests
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import copy
 import numpy as np
 from datetime import datetime
+from torch.utils.data import DataLoader
+
+from config import BATCH_SIZE, LOCAL_EPOCHS, LEARNING_RATE, COMPRESSION_RATIO, MAX_BATCHES_PER_EPOCH, COMPRESSED_CLIENTS
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -49,56 +51,86 @@ def compress_weights_top_k(weight_dict, compression_ratio=0.5):
         
     return compressed_payload
 
-def train_and_upload(model, images, server_url, node_id, model_type="autoencoder", vae_beta=1.0, channel_snr_db=None):
+
+def should_compress_client(node_id):
+    return node_id in COMPRESSED_CLIENTS
+
+def train_and_upload(model, dataset, server_url, node_id, model_type="autoencoder", vae_beta=1.0, channel_snr_db=None):
     """Treina o modelo (AE ou VAE) localmente e envia pesos ao servidor"""
     try:
-        model_before = copy.deepcopy(model)
-        
-        optimizer = optim.Adam(model.parameters(), lr=0.001)
+        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
         criterion = nn.MSELoss()
         model.train()
 
         # --- TREINO LOCAL ---
         is_vae = model_type == "vae"
         tag = "VAE" if is_vae else "Autoencoder"
-        log_terminal(f"🔥 Treinando {tag} ({images.shape[0]} imagens)...", node_id)
-        epochs = 5
-        final_loss = 0
-        
-        for epoch in range(epochs):
-            optimizer.zero_grad()
-            if is_vae:
-                from model_utils import ImageVAE
-                reconstructed, mu, logvar = model(images, snr_db=channel_snr_db)
-                recon_loss = criterion(reconstructed, images)
-                kl_loss = ImageVAE.kl_divergence(mu, logvar)
-                loss = recon_loss + vae_beta * kl_loss
-            else:
-                reconstructed = model(images, snr_db=channel_snr_db)
-                loss = criterion(reconstructed, images)
-            loss.backward()
-            optimizer.step()
-            final_loss = loss.item()
+        max_batches = MAX_BATCHES_PER_EPOCH if MAX_BATCHES_PER_EPOCH > 0 else None
+        train_loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+        final_loss = 0.0
+        processed_images = 0
+        last_batch = None
+
+        log_terminal(
+            f"🔥 Treinando {tag} ({len(dataset)} imagens locais, batch={BATCH_SIZE}, max_batches/época={max_batches or 'todos'})...",
+            node_id,
+        )
+
+        for epoch in range(LOCAL_EPOCHS):
+            epoch_losses = []
+            for batch_idx, (images, _) in enumerate(train_loader, start=1):
+                if max_batches is not None and batch_idx > max_batches:
+                    break
+
+                optimizer.zero_grad()
+                if is_vae:
+                    from model_utils import ImageVAE
+                    reconstructed, mu, logvar = model(images, snr_db=channel_snr_db)
+                    recon_loss = criterion(reconstructed, images)
+                    kl_loss = ImageVAE.kl_divergence(mu, logvar)
+                    loss = recon_loss + vae_beta * kl_loss
+                else:
+                    reconstructed = model(images, snr_db=channel_snr_db)
+                    loss = criterion(reconstructed, images)
+
+                loss.backward()
+                optimizer.step()
+
+                final_loss = loss.item()
+                epoch_losses.append(final_loss)
+                processed_images += images.size(0)
+                last_batch = images
+
+            if epoch_losses:
+                avg_epoch_loss = sum(epoch_losses) / len(epoch_losses)
+                log_terminal(f"   Época {epoch + 1}/{LOCAL_EPOCHS} | loss={avg_epoch_loss:.6f}", node_id)
+
+        if last_batch is None:
+            log_terminal("⚠️ Dataset local vazio. Treino ignorado.", node_id)
+            return
 
         # Info de compressão semântica
         with torch.no_grad():
             if is_vae:
-                mu, _ = model.encode(images)
+                mu, _ = model.encode(last_batch)
                 z = mu
             else:
-                z = model.encode(images)
-            pixels = images.numel()
+                z = model.encode(last_batch)
+            pixels = last_batch.numel()
             latent_size = z.numel()
             compression = pixels / latent_size
         
-        log_terminal(f"📊 Loss: {final_loss:.6f} | Compressão semântica: {compression:.0f}x ({latent_size} vs {pixels} valores)", node_id)
+        log_terminal(
+            f"📊 Loss final: {final_loss:.6f} | Amostras vistas: {processed_images} | Compressão semântica: {compression:.0f}x ({latent_size} vs {pixels} valores)",
+            node_id,
+        )
 
         # --- ENVIO DOS PESOS ---
         full_weights = model.state_dict()
         
-        if "full" not in node_id:
-            log_terminal("⚠️ Aplicando Compressão Top-K (60%)...", node_id)
-            final_payload = compress_weights_top_k(full_weights, compression_ratio=0.6)
+        if should_compress_client(node_id):
+            log_terminal(f"⚠️ Aplicando Compressão Top-K ({int(COMPRESSION_RATIO * 100)}%)...", node_id)
+            final_payload = compress_weights_top_k(full_weights, compression_ratio=COMPRESSION_RATIO)
         else:
             final_payload = {k: v.cpu().numpy().tolist() for k, v in full_weights.items()}
 
