@@ -111,7 +111,7 @@ def train_and_upload(model, text_batch, server_url, node_id, model_type="autoenc
         # --- ENVIO DOS PESOS ---
         full_weights = model.state_dict()
         
-        if "full" not in node_id:
+        if "noisy" in node_id:
             log_terminal(f"⚠️ Aplicando Compressão Top-K ({COMPRESSION_RATIO:.0%})...", node_id)
             final_payload = compress_weights_top_k(full_weights, compression_ratio=COMPRESSION_RATIO)
         else:

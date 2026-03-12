@@ -19,18 +19,20 @@ import shutil
 import requests
 from datetime import datetime
 
+from config import EXPERIMENT_ROUNDS, EXPERIMENT_STARTUP_WAIT, SCENARIO_SETTLE_SECONDS
+
 CHAOS_SCENARIOS = {
     "Normal":   {"loss": 0.00, "delay": 0,    "corrupt": 0.00, "duplicate": 0.00},
-    "Leve":     {"loss": 1.00, "delay": 200,   "corrupt": 0.00, "duplicate": 0.00},
-    "Moderado": {"loss": 3.00, "delay": 500,   "corrupt": 0.50, "duplicate": 1.00},
-    "Severo":   {"loss": 5.00, "delay": 1000,  "corrupt": 2.00, "duplicate": 5.00},
+    "Leve":     {"loss": 0.10, "delay": 50,   "corrupt": 0.00, "duplicate": 0.00},
+    "Moderado": {"loss": 0.25, "delay": 100,  "corrupt": 0.05, "duplicate": 0.10},
+    "Severo":   {"loss": 0.50, "delay": 150,  "corrupt": 0.10, "duplicate": 0.20},
 }
 
 STATUS_FILE = "status.json"
 CHAOS_CONFIG = "chaos_config.txt"
 DB_FILE = "metrics.db"
 RESULTS_DIR = "results"
-TARGET_ROUNDS = int(os.environ.get("EXPERIMENT_ROUNDS", "30"))
+TARGET_ROUNDS = int(os.environ.get("EXPERIMENT_ROUNDS", str(EXPERIMENT_ROUNDS)))
 POLL_INTERVAL = 3  # seconds
 SERVER_URL = os.environ.get("SERVER_URL", "http://fl-server:5000")
 
@@ -110,6 +112,20 @@ def reset_server():
         print("  ⚠️ Não foi possível resetar servidor (pode não estar acessível).")
 
 
+def wait_for_server_ready(max_attempts=20):
+    print("  🔎 Aguardando servidor responder...")
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = requests.post(f"{SERVER_URL}/reset_round", timeout=5)
+            if response.ok:
+                print(f"  ✅ Servidor acessível na tentativa {attempt}.")
+                return True
+        except Exception:
+            pass
+        time.sleep(2)
+    return False
+
+
 def wait_for_rounds(target):
     print(f"  ⏳ Aguardando {target} rodadas...")
     start = time.time()
@@ -135,7 +151,7 @@ def run_scenario(scenario_name):
 
     # 1. Pausar e resetar
     set_status("PAUSED")
-    time.sleep(2)
+    time.sleep(SCENARIO_SETTLE_SECONDS)
     reset_db()
     remove_global_model()
     reset_server()
@@ -143,7 +159,7 @@ def run_scenario(scenario_name):
     # 2. Aplicar cenário de caos
     apply_chaos(scenario_name)
     print(f"  ⚡ Caos aplicado: {scenario_name}")
-    time.sleep(2)
+    time.sleep(SCENARIO_SETTLE_SECONDS)
 
     # 3. Iniciar treinamento
     set_status("RUNNING")
@@ -174,6 +190,13 @@ def main():
     print(f"   Cenários: {list(CHAOS_SCENARIOS.keys())}")
     print(f"   Rodadas por cenário: {TARGET_ROUNDS}")
     print("=" * 60)
+
+    if not wait_for_server_ready():
+        print("❌ Servidor não respondeu a tempo. Abortando experimentos.")
+        sys.exit(1)
+
+    print(f"⏳ Esperando {EXPERIMENT_STARTUP_WAIT}s para os clientes estabilizarem...")
+    time.sleep(EXPERIMENT_STARTUP_WAIT)
 
     start_time = time.time()
 

@@ -55,6 +55,8 @@ plt.rcParams.update({
     "font.family": "serif",
 })
 
+LATEX_ROW_BREAK = r"\\"
+
 
 def ensure_dirs():
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -212,11 +214,11 @@ def generate_tab_reconstruction(rows):
         "\\label{tab:reconstruction}",
         "\\begin{tabular}{cccc}",
         "\\hline",
-        "\\textbf{Documento} & \\textbf{Chunks} & \\textbf{CE Loss} & \\textbf{Accuracy (\\%)} \\",
+        f"\\textbf{{Documento}} & \\textbf{{Chunks}} & \\textbf{{CE Loss}} & \\textbf{{Accuracy (\\%)}} {LATEX_ROW_BREAK}",
         "\\hline",
     ]
     for index, (_, _, ce_loss, accuracy, chunks) in enumerate(rows, start=1):
-        lines.append(f"{index} & {chunks} & {ce_loss:.4f} & {accuracy:.1f} \\")
+        lines.append(f"{index} & {chunks} & {ce_loss:.4f} & {accuracy:.1f} {LATEX_ROW_BREAK}")
     lines.extend(["\\hline", "\\end{tabular}", "\\end{table}"])
     with open(os.path.join(TABLES_DIR, "tab_reconstruction.tex"), "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
@@ -283,11 +285,11 @@ def generate_tab_completion(rows):
         "\\label{tab:completion}",
         "\\begin{tabular}{cccc}",
         "\\hline",
-        "\\textbf{Estratégia} & \\textbf{Máscara (\\%)} & \\textbf{CE Loss} & \\textbf{Accuracy (\\%)} \\",
+        f"\\textbf{{Estratégia}} & \\textbf{{Máscara (\\%)}} & \\textbf{{CE Loss}} & \\textbf{{Accuracy (\\%)}} {LATEX_ROW_BREAK}",
         "\\hline",
     ]
     for row in rows:
-        lines.append(f"{row['strategy']} & {row['mask_ratio'] * 100:.0f} & {row['ce_loss']:.4f} & {row['accuracy']:.1f} \\")
+        lines.append(f"{row['strategy']} & {row['mask_ratio'] * 100:.0f} & {row['ce_loss']:.4f} & {row['accuracy']:.1f} {LATEX_ROW_BREAK}")
     lines.extend(["\\hline", "\\end{tabular}", "\\end{table}"])
     with open(os.path.join(TABLES_DIR, "tab_completion.tex"), "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
@@ -338,14 +340,14 @@ def generate_tab_chaos():
         "\\label{tab:chaos_results}",
         "\\begin{tabular}{lccccc}",
         "\\hline",
-        "\\textbf{Cenário} & \\textbf{CE final} & \\textbf{Accuracy final} & \\textbf{Rodadas} & \\textbf{Melhor CE} & \\textbf{Melhor Acc.} \\",
+        f"\\textbf{{Cenário}} & \\textbf{{CE final}} & \\textbf{{Accuracy final}} & \\textbf{{Rodadas}} & \\textbf{{Melhor CE}} & \\textbf{{Melhor Acc.}} {LATEX_ROW_BREAK}",
         "\\hline",
     ]
     for scenario in SCENARIOS:
         df = load_round_metrics_csv(scenario)
         if df is None or df.empty:
             continue
-        lines.append(f"{scenario} & {df['global_celoss'].iloc[-1]:.4f} & {df['global_accuracy'].iloc[-1]:.1f} & {len(df)} & {df['global_celoss'].min():.4f} & {df['global_accuracy'].max():.1f} \\")
+        lines.append(f"{scenario} & {df['global_celoss'].iloc[-1]:.4f} & {df['global_accuracy'].iloc[-1]:.1f} & {len(df)} & {df['global_celoss'].min():.4f} & {df['global_accuracy'].max():.1f} {LATEX_ROW_BREAK}")
     lines.extend(["\\hline", "\\end{tabular}", "\\end{table}"])
     with open(os.path.join(TABLES_DIR, "tab_chaos_results.tex"), "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")

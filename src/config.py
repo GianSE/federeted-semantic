@@ -25,7 +25,7 @@ BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "32"))
 LOCAL_EPOCHS = int(os.environ.get("LOCAL_EPOCHS", "5"))
 LEARNING_RATE = float(os.environ.get("LEARNING_RATE", "0.001"))
 REQUIRED_CLIENTS = int(os.environ.get("REQUIRED_CLIENTS", "3"))
-COMPRESSION_RATIO = float(os.environ.get("COMPRESSION_RATIO", "0.6"))
+COMPRESSION_RATIO = float(os.environ.get("COMPRESSION_RATIO", "0.2"))
 
 # === FedProx ===
 FEDPROX_MU = float(os.environ.get("FEDPROX_MU", "0.0"))
@@ -33,7 +33,7 @@ FEDPROX_MU = float(os.environ.get("FEDPROX_MU", "0.0"))
 # === Dataset textual ===
 TEXT_DATASET = os.environ.get("TEXT_DATASET", "local_corpus")
 DATA_DIST = os.environ.get("DATA_DIST", "iid")
-NONIID_LABELS = parse_label_list(os.environ.get("NONIID_LABELS", "1,2"), [1, 2])
+NONIID_LABELS = parse_label_list(os.environ.get("NONIID_LABELS", "1,2,3"), [1, 2, 3])
 
 # === Texto longo ===
 TEXT_CHUNK_SIZE = int(os.environ.get("TEXT_CHUNK_SIZE", "50"))
@@ -50,6 +50,8 @@ CHAOS_SCENARIO = os.environ.get("CHAOS_SCENARIO", "Normal")
 EXPERIMENT_ROUNDS = int(os.environ.get("EXPERIMENT_ROUNDS", "30"))
 TEST_BATCH_SIZE = int(os.environ.get("TEST_BATCH_SIZE", "100"))
 ROUND_TIMEOUT = int(os.environ.get("ROUND_TIMEOUT", "30"))
+EXPERIMENT_STARTUP_WAIT = int(os.environ.get("EXPERIMENT_STARTUP_WAIT", "8"))
+SCENARIO_SETTLE_SECONDS = int(os.environ.get("SCENARIO_SETTLE_SECONDS", "5"))
 
 # === Servidor ===
 MAX_CONTENT_LENGTH = 50 * 1024 * 1024
