@@ -1,0 +1,97 @@
+# ===========================
+# Python
+# ===========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ===========================
+# Ambientes Virtuais
+# ===========================
+venv/
+env/
+.venv/
+.env
+
+# ===========================
+# Sistema Operacional
+# ===========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+*.swp
+*.swo
+*~
+
+# ===========================
+# IDEs / Editores
+# ===========================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ===========================
+# Logs do Projeto
+# ===========================
+src/logs/
+*.log
+
+# ===========================
+# Banco de Dados e Estado
+# ===========================
+*.db
+*.db-journal
+src/metrics.db
+src/status.json
+
+# ===========================
+# Modelo e Dados (runtime)
+# ===========================
+src/global_model.pth
+src/data/
+src/chaos_config.txt
+
+# ===========================
+# Resultados de Experimentos (runtime)
+# ===========================
+src/results/
+
+# ===========================
+# LaTeX (arquivos de compilação)
+# ===========================
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.pdf
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.synctex.gz
+paper/*.toc
+paper/*.lof
+paper/*.lot
+paper/*.nav
+paper/*.snm
+paper/*.vrb
+paper/*.dvi
+paper/*.ps
+
+# ===========================
+# Docker (cache local)
+# ===========================
+.docker/
+
+# ===========================
+# Misc
+# ===========================
+*.bak
+*.tmp
+*.orig
