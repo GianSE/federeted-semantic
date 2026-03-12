@@ -25,6 +25,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
+from config import DATASET_DISPLAY_NAME, LATENT_DIM, MODEL_TYPE, PIXELS_PER_IMAGE, CLASS_NAMES, LABEL_KIND, NONIID_LABELS
+from image_utils import load_dataset, compute_mse, compute_psnr, compute_ssim, tensor_to_image_array, label_to_name
+
 # ============================================================
 # Config
 # ============================================================
@@ -37,7 +40,11 @@ MODEL_CHECKPOINT = os.environ.get("MODEL_CHECKPOINT", "global_model.pth")
 SCENARIOS = ["Normal", "Leve", "Moderado", "Severo"]
 SCENARIO_COLORS = {"Normal": "#2196F3", "Leve": "#4CAF50", "Moderado": "#FF9800", "Severo": "#F44336"}
 CLIENT_COLORS = {"client-full": "#2196F3", "client-noisy": "#FF9800", "client-noniid": "#4CAF50"}
-CLIENT_LABELS = {"client-full": "Full (Estável)", "client-noisy": "Noisy (Top-K)", "client-noniid": "Non-IID (Dígitos 0-3)"}
+CLIENT_LABELS = {
+    "client-full": "Full (Estável)",
+    "client-noisy": "Noisy (Top-K)",
+    "client-noniid": f"Non-IID ({LABEL_KIND}s {', '.join(str(label) for label in NONIID_LABELS)})",
+}
 
 plt.rcParams.update({
     'font.size': 11,
@@ -61,10 +68,32 @@ def load_checkpoint(model, checkpoint_path):
     if not os.path.exists(checkpoint_path):
         print(f"  ⚠️ Checkpoint não encontrado: {checkpoint_path}. Pulando.")
         return False
+    try:
+        model.load_state_dict(torch.load(checkpoint_path, map_location="cpu", weights_only=True))
+        print(f"  ℹ️ Checkpoint: {os.path.abspath(checkpoint_path)}")
+        return True
+    except RuntimeError as e:
+        print(f"  ❌ Erro ao carregar checkpoint: {checkpoint_path}\n    {e}")
+        return False
 
-    model.load_state_dict(torch.load(checkpoint_path, map_location="cpu", weights_only=True))
-    print(f"  ℹ️ Checkpoint: {os.path.abspath(checkpoint_path)}")
-    return True
+
+def plot_tensor(ax, tensor_like):
+    image = tensor_to_image_array(tensor_like)
+    if image.ndim == 2:
+        ax.imshow(image, cmap='gray', vmin=0, vmax=1)
+    else:
+        ax.imshow(image)
+
+
+def collect_class_examples(dataset):
+    examples = {}
+    for index in range(len(dataset)):
+        image, label = dataset[index]
+        if label not in examples:
+            examples[label] = image
+        if len(examples) == len(CLASS_NAMES):
+            break
+    return examples
 
 
 # ============================================================
@@ -186,58 +215,42 @@ def generate_fig_convergence():
 # ============================================================
 def generate_fig_reconstruction(checkpoint_path):
     print("📊 Gerando fig_reconstruction.png...")
-    
-    try:
-        from model_utils import get_model
-        from image_utils import load_mnist, compute_mse, compute_psnr, compute_ssim
-        from config import MODEL_TYPE, LATENT_DIM
-    except ImportError:
-        print("  ⚠️ Imports falham. Pulando.")
-        return
+
+    from model_utils import get_model
     
     model = get_model(MODEL_TYPE, LATENT_DIM)
     if not load_checkpoint(model, checkpoint_path):
         return
     model.eval()
     
-    dataset = load_mnist(train=False)
-    
-    # Find one example of each digit 0-9
-    digit_examples = {}
-    for i in range(len(dataset)):
-        img, label = dataset[i]
-        if label not in digit_examples:
-            digit_examples[label] = img
-        if len(digit_examples) == 10:
-            break
-    
-    # Select 5 diverse digits
-    selected_digits = [0, 2, 4, 7, 9]
+    dataset = load_dataset(train=False)
+    class_examples = collect_class_examples(dataset)
+    selected_labels = list(range(min(5, len(CLASS_NAMES))))
     originals = []
     reconstructions = []
     labels = []
     mses = []
     psnrs = []
     
-    for d in selected_digits:
-        img = digit_examples[d].unsqueeze(0)
+    for label in selected_labels:
+        img = class_examples[label].unsqueeze(0)
         with torch.no_grad():
             output = model(img)
             recon = output[0] if isinstance(output, tuple) else output
-        originals.append(img.squeeze().numpy())
-        reconstructions.append(recon.squeeze().numpy())
-        labels.append(d)
+        originals.append(img)
+        reconstructions.append(recon)
+        labels.append(label_to_name(label))
         mses.append(compute_mse(img, recon))
         psnrs.append(compute_psnr(img, recon))
     
-    fig, axes = plt.subplots(2, 5, figsize=(12, 5))
+    fig, axes = plt.subplots(2, len(selected_labels), figsize=(12, 5))
     
-    for i in range(5):
-        axes[0, i].imshow(originals[i], cmap='gray', vmin=0, vmax=1)
-        axes[0, i].set_title(f"Dígito {labels[i]}", fontsize=11)
+    for i in range(len(selected_labels)):
+        plot_tensor(axes[0, i], originals[i])
+        axes[0, i].set_title(labels[i], fontsize=11)
         axes[0, i].axis('off')
         
-        axes[1, i].imshow(reconstructions[i], cmap='gray', vmin=0, vmax=1)
+        plot_tensor(axes[1, i], reconstructions[i])
         axes[1, i].set_title(f"MSE:{mses[i]:.4f}\nPSNR:{psnrs[i]:.1f}dB", fontsize=9)
         axes[1, i].axis('off')
     
@@ -245,7 +258,7 @@ def generate_fig_reconstruction(checkpoint_path):
     axes[1, 0].set_ylabel("Reconstruído", fontsize=12, rotation=0, labelpad=60, va='center')
     
     fig.suptitle(
-        f"Reconstrução Semântica: 784 pixels → {LATENT_DIM} valores latentes → 784 pixels\nCheckpoint: {os.path.basename(checkpoint_path)}",
+        f"Reconstrução Semântica: {PIXELS_PER_IMAGE} pixels → {LATENT_DIM} valores latentes → {PIXELS_PER_IMAGE} pixels | {DATASET_DISPLAY_NAME}\nCheckpoint: {os.path.basename(checkpoint_path)}",
         fontsize=13,
         y=1.05,
     )
@@ -261,43 +274,35 @@ def generate_fig_reconstruction(checkpoint_path):
 
 
 def generate_tab_reconstruction(model, dataset):
-    """Tabela LaTeX: MSE, PSNR e SSIM para cada dígito"""
-    from image_utils import compute_mse, compute_psnr, compute_ssim
-    
-    digit_examples = {}
-    for i in range(len(dataset)):
-        img, label = dataset[i]
-        if label not in digit_examples:
-            digit_examples[label] = img
-        if len(digit_examples) == 10:
-            break
+    """Tabela LaTeX: MSE, PSNR e SSIM por classe."""
+    class_examples = collect_class_examples(dataset)
     
     rows = []
-    for d in range(10):
-        img = digit_examples[d].unsqueeze(0)
+    for label in range(len(CLASS_NAMES)):
+        img = class_examples[label].unsqueeze(0)
         with torch.no_grad():
             output = model(img)
             recon = output[0] if isinstance(output, tuple) else output
         mse = compute_mse(img, recon)
         psnr = compute_psnr(img, recon)
         ssim = compute_ssim(img, recon)
-        rows.append((d, mse, psnr, ssim, "24.5$\\times$"))
+        rows.append((label_to_name(label), mse, psnr, ssim, f"{PIXELS_PER_IMAGE / LATENT_DIM:.1f}$\\times$"))
     
     avg_mse = np.mean([r[1] for r in rows])
     avg_psnr = np.mean([r[2] for r in rows])
     avg_ssim = np.mean([r[3] for r in rows])
     
     tex = "\\begin{table}[htbp]\n\\centering\n"
-    tex += "\\caption{Métricas de reconstrução semântica por dígito.}\n"
+    tex += f"\\caption{{Métricas de reconstrução semântica por {LABEL_KIND} em {DATASET_DISPLAY_NAME}.}}\n"
     tex += "\\label{tab:reconstruction}\n"
     tex += "\\begin{tabular}{ccccc}\n\\hline\n"
-    tex += "\\textbf{Dígito} & \\textbf{MSE} & \\textbf{PSNR (dB)} & \\textbf{SSIM} & \\textbf{Compressão} \\\\\n\\hline\n"
+    tex += f"\\textbf{{{LABEL_KIND.title()}}} & \\textbf{{MSE}} & \\textbf{{PSNR (dB)}} & \\textbf{{SSIM}} & \\textbf{{Compressão}} \\\\\n\\hline\n"
     
     for d, mse, psnr, ssim, comp in rows:
         tex += f"{d} & {mse:.4f} & {psnr:.1f} & {ssim:.4f} & {comp} \\\\\n"
     
     tex += "\\hline\n"
-    tex += f"\\textbf{{Média}} & \\textbf{{{avg_mse:.4f}}} & \\textbf{{{avg_psnr:.1f}}} & \\textbf{{{avg_ssim:.4f}}} & 24.5$\\times$ \\\\\n"
+    tex += f"\\textbf{{Média}} & \\textbf{{{avg_mse:.4f}}} & \\textbf{{{avg_psnr:.1f}}} & \\textbf{{{avg_ssim:.4f}}} & {PIXELS_PER_IMAGE / LATENT_DIM:.1f}$\\times$ \\\\\n"
     tex += "\\hline\n\\end{tabular}\n\\end{table}\n"
     
     path = os.path.join(TABLES_DIR, "tab_reconstruction.tex")
@@ -311,23 +316,17 @@ def generate_tab_reconstruction(model, dataset):
 # ============================================================
 def generate_fig_completion(checkpoint_path):
     print("📊 Gerando fig_completion.png...")
-    
-    try:
-        from model_utils import get_model
-        from image_utils import (load_mnist, mask_image_bottom, mask_image_random,
-                                 mask_image_right, compute_mse, compute_psnr, compute_ssim)
-        from config import MODEL_TYPE, LATENT_DIM
-    except ImportError:
-        print("  ⚠️ Imports falham. Pulando.")
-        return
+
+    from model_utils import get_model
+    from image_utils import mask_image_bottom, mask_image_random, mask_image_right
     
     model = get_model(MODEL_TYPE, LATENT_DIM)
     if not load_checkpoint(model, checkpoint_path):
         return
     model.eval()
     
-    dataset = load_mnist(train=False)
-    img, label = dataset[3]  # Pick a good digit
+    dataset = load_dataset(train=False)
+    img, label = dataset[3]
     original = img.unsqueeze(0)
     
     configs = [
@@ -350,15 +349,15 @@ def generate_fig_completion(checkpoint_path):
         mse = compute_mse(original, completed)
         psnr = compute_psnr(original, completed)
         
-        axes[row_idx, 0].imshow(original.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
+        plot_tensor(axes[row_idx, 0], original)
         axes[row_idx, 0].set_ylabel(title, fontsize=10, rotation=0, labelpad=100, va='center')
         axes[row_idx, 0].axis('off')
         
-        axes[row_idx, 1].imshow(masked.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
+        plot_tensor(axes[row_idx, 1], masked)
         axes[row_idx, 1].set_title(f"{(1-pct)*100:.0f}% enviado" if row_idx == 0 else "")
         axes[row_idx, 1].axis('off')
         
-        axes[row_idx, 2].imshow(completed.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
+        plot_tensor(axes[row_idx, 2], completed)
         axes[row_idx, 2].set_title(f"MSE:{mse:.4f} PSNR:{psnr:.1f}dB", fontsize=9)
         axes[row_idx, 2].axis('off')
     
@@ -366,7 +365,7 @@ def generate_fig_completion(checkpoint_path):
         axes[0, i].set_title(title, fontsize=12, fontweight='bold')
     
     fig.suptitle(
-        f"Completação de Imagem Parcial (Dígito {label})\nCheckpoint: {os.path.basename(checkpoint_path)}",
+        f"Completação de Imagem Parcial ({LABEL_KIND.title()}: {label_to_name(label)}) | {DATASET_DISPLAY_NAME}\nCheckpoint: {os.path.basename(checkpoint_path)}",
         fontsize=14,
         y=1.05,
     )
@@ -544,19 +543,42 @@ def main():
         if idx + 1 >= len(args):
             raise SystemExit("Uso: python generate_figures.py [--live] [--checkpoint CAMINHO_DO_MODELO]")
         checkpoint_path = args[idx + 1]
-    
+
+    # Tenta encontrar checkpoint compatível automaticamente se o padrão não existir ou for incompatível
+    def find_compatible_checkpoint():
+        candidates = [
+            os.path.join("results", "Normal_model.pth"),
+            os.path.join("results", "Centralizado_AE_model.pth"),
+            os.path.join("results", "Centralizado_VAE_model.pth"),
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return checkpoint_path
+
+    # Testa se o checkpoint padrão é carregável, senão tenta alternativos
+    from model_utils import get_model
+    test_model = get_model(MODEL_TYPE, LATENT_DIM)
+    if not load_checkpoint(test_model, checkpoint_path):
+        alt_ckpt = find_compatible_checkpoint()
+        if alt_ckpt != checkpoint_path:
+            print(f"  ⚠️ Tentando checkpoint alternativo: {alt_ckpt}")
+            checkpoint_path = alt_ckpt
+        else:
+            print("  ❌ Nenhum checkpoint compatível encontrado. Figuras de reconstrução não serão geradas.")
+
     print("=" * 60)
     print("📊 GERADOR DE FIGURAS E TABELAS")
     print(f"   Modo: {'Live (metrics.db)' if live_mode else 'CSVs (results/)'}")
     print(f"   Checkpoint: {checkpoint_path}")
     print("=" * 60)
-    
+
     generate_fig_convergence()
     generate_fig_reconstruction(checkpoint_path)
     generate_fig_completion(checkpoint_path)
     generate_fig_chaos()
     generate_analysis()
-    
+
     print(f"\n✅ Figuras salvas em: {os.path.abspath(FIGURES_DIR)}")
     print(f"✅ Tabelas salvas em: {os.path.abspath(TABLES_DIR)}")
 

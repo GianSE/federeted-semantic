@@ -2,13 +2,13 @@ import os
 import time
 import requests
 import torch
-import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 from datetime import datetime
 from torch.utils.data import DataLoader
 
-from config import BATCH_SIZE, LOCAL_EPOCHS, LEARNING_RATE, COMPRESSION_RATIO, MAX_BATCHES_PER_EPOCH, COMPRESSED_CLIENTS
+from config import BATCH_SIZE, LOCAL_EPOCHS, LEARNING_RATE, COMPRESSION_RATIO, MAX_BATCHES_PER_EPOCH, COMPRESSED_CLIENTS, RECON_SSIM_WEIGHT
+from image_utils import reconstruction_loss
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -59,7 +59,6 @@ def train_and_upload(model, dataset, server_url, node_id, model_type="autoencode
     """Treina o modelo (AE ou VAE) localmente e envia pesos ao servidor"""
     try:
         optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-        criterion = nn.MSELoss()
         model.train()
 
         # --- TREINO LOCAL ---
@@ -86,12 +85,12 @@ def train_and_upload(model, dataset, server_url, node_id, model_type="autoencode
                 if is_vae:
                     from model_utils import ImageVAE
                     reconstructed, mu, logvar = model(images, snr_db=channel_snr_db)
-                    recon_loss = criterion(reconstructed, images)
+                    recon_loss = reconstruction_loss(images, reconstructed, ssim_weight=RECON_SSIM_WEIGHT)
                     kl_loss = ImageVAE.kl_divergence(mu, logvar)
                     loss = recon_loss + vae_beta * kl_loss
                 else:
                     reconstructed = model(images, snr_db=channel_snr_db)
-                    loss = criterion(reconstructed, images)
+                    loss = reconstruction_loss(images, reconstructed, ssim_weight=RECON_SSIM_WEIGHT)
 
                 loss.backward()
                 optimizer.step()

@@ -13,14 +13,13 @@ import sys
 import time
 import csv
 import torch
-import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 from torch.utils.data import DataLoader
 
 from model_utils import ImageVAE, get_model
-from image_utils import load_mnist, compute_ssim
-from config import LATENT_DIM, BATCH_SIZE, LEARNING_RATE, LOCAL_EPOCHS, MAX_BATCHES_PER_EPOCH, TEST_BATCH_SIZE
+from image_utils import load_dataset, compute_ssim, reconstruction_loss
+from config import LATENT_DIM, BATCH_SIZE, LEARNING_RATE, LOCAL_EPOCHS, MAX_BATCHES_PER_EPOCH, TEST_BATCH_SIZE, DATASET_DISPLAY_NAME, RECON_SSIM_WEIGHT
 
 RESULTS_DIR = "results"
 ROUNDS = int(os.environ.get("EXPERIMENT_ROUNDS", "30"))
@@ -60,15 +59,13 @@ def train_centralized(model_type="autoencoder", snr_db=None, rounds=ROUNDS):
     tag = "VAE" if is_vae else "AE"
 
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    criterion = nn.MSELoss()
-
-    dataset_train = load_mnist(train=True)
-    dataset_test = load_mnist(train=False)
+    dataset_train = load_dataset(train=True)
+    dataset_test = load_dataset(train=False)
     train_loader = DataLoader(dataset_train, batch_size=BATCH_SIZE, shuffle=True)
     test_loader = DataLoader(dataset_test, batch_size=TEST_BATCH_SIZE, shuffle=False)
     max_batches = MAX_BATCHES_PER_EPOCH if MAX_BATCHES_PER_EPOCH > 0 else None
 
-    print(f"🏋️ Treinamento Centralizado — {tag}")
+    print(f"🏋️ Treinamento Centralizado — {tag} | {DATASET_DISPLAY_NAME}")
     print(f"   Rodadas: {rounds} | Épocas/rodada: {LOCAL_EPOCHS} | Batch: {BATCH_SIZE}")
     print(f"   Batches/época: {max_batches or 'todos'}")
     if snr_db is not None:
@@ -89,12 +86,12 @@ def train_centralized(model_type="autoencoder", snr_db=None, rounds=ROUNDS):
                 optimizer.zero_grad()
                 if is_vae:
                     recon, mu, logvar = model(images, snr_db=snr_db)
-                    recon_loss = criterion(recon, images)
+                    recon_loss = reconstruction_loss(images, recon, ssim_weight=RECON_SSIM_WEIGHT)
                     kl_loss = ImageVAE.kl_divergence(mu, logvar)
                     loss = recon_loss + kl_loss
                 else:
                     recon = model(images, snr_db=snr_db)
-                    loss = criterion(recon, images)
+                    loss = reconstruction_loss(images, recon, ssim_weight=RECON_SSIM_WEIGHT)
 
                 loss.backward()
                 optimizer.step()

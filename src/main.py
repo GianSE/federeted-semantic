@@ -6,8 +6,8 @@ import json
 from server import app as flask_app
 from client import train_and_upload
 from model_utils import get_model
-from image_utils import load_mnist, load_mnist_filtered
-from config import NONIID_LABELS, MODEL_TYPE, LATENT_DIM, VAE_BETA, CHANNEL_SNR_DB
+from image_utils import load_dataset, load_dataset_filtered
+from config import NONIID_LABELS, MODEL_TYPE, LATENT_DIM, VAE_BETA, CHANNEL_SNR_DB, DATASET_DISPLAY_NAME, LABEL_KIND
 
 def init_db():
     conn = sqlite3.connect('metrics.db', check_same_thread=False)
@@ -46,15 +46,15 @@ if __name__ == "__main__":
         if channel_snr is not None:
             print(f"[{node_id}] Canal AWGN ativo: SNR={channel_snr} dB")
         
-        # Carrega MNIST (Non-IID para client-noniid)
+        # Carrega dataset configurado (Non-IID para client-noniid)
         if "noniid" in node_id:
-            print(f"[{node_id}] Carregando MNIST Non-IID (dígitos {NONIID_LABELS})...")
-            dataset = load_mnist_filtered(train=True, allowed_labels=NONIID_LABELS)
-            print(f"[{node_id}] MNIST Non-IID carregado: {len(dataset)} imagens (dígitos {NONIID_LABELS}).")
+            print(f"[{node_id}] Carregando {DATASET_DISPLAY_NAME} Non-IID ({LABEL_KIND}s {NONIID_LABELS})...")
+            dataset = load_dataset_filtered(train=True, allowed_labels=NONIID_LABELS)
+            print(f"[{node_id}] {DATASET_DISPLAY_NAME} Non-IID carregado: {len(dataset)} imagens ({LABEL_KIND}s {NONIID_LABELS}).")
         else:
-            print(f"[{node_id}] Carregando MNIST...")
-            dataset = load_mnist(train=True)
-            print(f"[{node_id}] MNIST carregado: {len(dataset)} imagens.")
+            print(f"[{node_id}] Carregando {DATASET_DISPLAY_NAME}...")
+            dataset = load_dataset(train=True)
+            print(f"[{node_id}] {DATASET_DISPLAY_NAME} carregado: {len(dataset)} imagens.")
         
         while True:
             if is_paused():

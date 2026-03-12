@@ -11,6 +11,8 @@ services:
     container_name: fl_server
     environment:
       - MODE=server
+      - DATASET=${DATASET:-mnist}
+      - TRAINING_PROFILE=${TRAINING_PROFILE:-standard}
     volumes:
       - ../src:/app
     networks:
@@ -29,6 +31,8 @@ services:
       - MODE=client
       - SERVER_URL=http://fl-server:5000
       - HOSTNAME=client-full
+      - DATASET=${DATASET:-mnist}
+      - TRAINING_PROFILE=${TRAINING_PROFILE:-standard}
     networks:
       - fl-network
 
@@ -46,6 +50,8 @@ services:
       - MODE=client
       - SERVER_URL=http://fl-server:5000
       - HOSTNAME=client-noisy
+      - DATASET=${DATASET:-mnist}
+      - TRAINING_PROFILE=${TRAINING_PROFILE:-standard}
     networks:
       - fl-network
 
@@ -63,6 +69,8 @@ services:
       - MODE=client
       - SERVER_URL=http://fl-server:5000
       - HOSTNAME=client-noniid
+      - DATASET=${DATASET:-mnist}
+      - TRAINING_PROFILE=${TRAINING_PROFILE:-standard}
     networks:
       - fl-network
 
@@ -78,6 +86,8 @@ services:
       - ../src:/app
     environment:
       - SERVER_URL=http://fl-server:5000
+      - DATASET=${DATASET:-mnist}
+      - TRAINING_PROFILE=${TRAINING_PROFILE:-standard}
     networks:
       - fl-network
 
@@ -109,6 +119,8 @@ services:
       - FIGURES_DIR=/paper/figures
       - TABLES_DIR=/paper/tables
       - SERVER_URL=http://fl-server:5000
+      - DATASET=${DATASET:-mnist}
+      - TRAINING_PROFILE=${TRAINING_PROFILE:-standard}
     networks:
       - fl-network
     profiles:

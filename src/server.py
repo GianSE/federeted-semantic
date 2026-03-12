@@ -148,14 +148,14 @@ def evaluate_global_model():
     """Avalia o modelo global em imagens de teste e retorna MSE, PSNR e SSIM"""
     try:
         from model_utils import get_model
-        from image_utils import load_mnist, compute_ssim
+        from image_utils import load_dataset, compute_ssim
 
         initialize_global_model(force_reset=False)
         
         model = get_model(MODEL_TYPE, LATENT_DIM)
         model.load_state_dict(torch.load(GLOBAL_MODEL_PATH, map_location="cpu", weights_only=True))
         
-        dataset = load_mnist(train=False)
+        dataset = load_dataset(train=False)
         test_loader = DataLoader(dataset, batch_size=TEST_BATCH_SIZE, shuffle=False)
         mse, psnr, ssim = evaluate_model(model, test_loader)
         return mse, psnr, ssim

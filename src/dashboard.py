@@ -22,15 +22,24 @@ import matplotlib.pyplot as plt
 # ============================================================
 try:
     from model_utils import ImageAutoencoder, get_model
-    from image_utils import (load_mnist, get_random_batch,
+    from image_utils import (load_dataset, get_random_batch,
                              mask_image_bottom, mask_image_random,
-                             mask_image_right, compute_mse, compute_psnr, compute_ssim)
-    from config import MODEL_TYPE, LATENT_DIM
+                             mask_image_right, compute_mse, compute_psnr, compute_ssim,
+                             tensor_to_image_array, label_to_name)
+    from config import MODEL_TYPE, LATENT_DIM, DATASET_DISPLAY_NAME, PIXELS_PER_IMAGE, CLASS_NAMES, LABEL_KIND
     IMPORTS_OK = True
 except ImportError as e:
     IMPORTS_OK = False
     MODEL_TYPE = "autoencoder"
     LATENT_DIM = 32
+    DATASET_DISPLAY_NAME = "MNIST"
+    PIXELS_PER_IMAGE = 784
+    CLASS_NAMES = [str(i) for i in range(10)]
+    LABEL_KIND = "dígito"
+
+
+def format_image_for_ui(tensor):
+    return tensor_to_image_array(tensor)
 
 # ============================================================
 # Estilo CSS
@@ -174,7 +183,7 @@ if st.sidebar.button("🗑️ Limpar Histórico (Reset DB)"):
 # ============================================================
 # MAIN AREA
 # ============================================================
-st.title("🛰️ Aprendizado Federado: Comunicação Semântica de Imagens")
+st.title(f"🛰️ Aprendizado Federado: Comunicação Semântica de Imagens ({DATASET_DISPLAY_NAME})")
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📐 Arquitetura", "📡 Comunicação", "🧩 Completação", 
@@ -193,13 +202,13 @@ with tab1:
     """)
     
     # Topology diagram using graphviz
-    st.graphviz_chart('''
-    digraph FL {
+    st.graphviz_chart(f'''
+    digraph FL {{
         rankdir=TB;
         node [shape=box, style="rounded,filled", fontname="Helvetica"];
         edge [fontname="Helvetica", fontsize=10];
         
-        subgraph cluster_clients {
+        subgraph cluster_clients {{
             label="Clientes Locais";
             style="dashed"; color="#666";
             
@@ -207,14 +216,14 @@ with tab1:
                   fillcolor="#E3F2FD", color="#2196F3", penwidth=2];
             noisy [label="🟠 client-noisy\\nDados: IID (todos)\\nPesos: Top-K (40%)\\nRede: Caos (tc netem)", 
                    fillcolor="#FFF3E0", color="#FF9800", penwidth=2];
-            noniid [label="🟢 client-noniid\\nDados: Non-IID (0-3)\\nPesos: Completos\\nRede: Estável", 
+            noniid [label="🟢 client-noniid\\nDados: Non-IID ({', '.join(str(label) for label in CLASS_NAMES[:4]) if LABEL_KIND == 'classe' else ', '.join(str(label) for label in CLASS_NAMES[:4])})\\nPesos: Completos\\nRede: Estável", 
                     fillcolor="#E8F5E9", color="#4CAF50", penwidth=2];
-        }
+        }}
         
         server [label="🧠 Servidor FL\\nAgregação FedAvg\\nAvaliação Global", 
                 fillcolor="#F3E5F5", color="#9C27B0", penwidth=2];
         
-        global_model [label="📦 Modelo Global\\nglobal_model.pth\\n(Autoencoder 784→32→784)", 
+        global_model [label="📦 Modelo Global\\nglobal_model.pth\\n(Autoencoder {PIXELS_PER_IMAGE}→{LATENT_DIM}→{PIXELS_PER_IMAGE})", 
                       fillcolor="#FFFDE7", color="#FFC107", penwidth=2];
         
         chaos [label="💥 Chaos Injector\\ntc netem\\n(loss/delay/corrupt)", 
@@ -230,7 +239,7 @@ with tab1:
         global_model -> noniid [label="  Download  ", style="dotted"];
         
         chaos -> noisy [label="  Interfere  ", color="#F44336", style="bold"];
-    }
+    }}
     ''')
     
     # Client profiles
@@ -238,27 +247,27 @@ with tab1:
     c1, c2, c3 = st.columns(3)
     
     with c1:
-        st.markdown("""
+        st.markdown(f"""
         #### 🔵 client-full (Estável)
-        - **Dados:** IID — todos os 10 dígitos
+        - **Dados:** IID — todas as classes de {DATASET_DISPLAY_NAME}
         - **Pesos:** Enviados completos (100%)
         - **Rede:** Sem perturbação
         - **Papel:** Baseline confiável
         """)
     
     with c2:
-        st.markdown("""
+        st.markdown(f"""
         #### 🟠 client-noisy (Instável)
-        - **Dados:** IID — todos os 10 dígitos
+        - **Dados:** IID — todas as classes de {DATASET_DISPLAY_NAME}
         - **Pesos:** Compressão Top-K (60% zerados)
         - **Rede:** Caos: loss, latência, corrupção
         - **Papel:** Testa resiliência do FL
         """)
     
     with c3:
-        st.markdown("""
+        st.markdown(f"""
         #### 🟢 client-noniid (Heterogêneo)
-        - **Dados:** Non-IID — apenas dígitos 0-3
+        - **Dados:** Non-IID — apenas labels {list(range(4)) if LABEL_KIND == 'dígito' else CLASS_NAMES[:4]}
         - **Pesos:** Enviados completos (100%)
         - **Rede:** Sem perturbação
         - **Papel:** Testa robustez a dados enviesados
@@ -268,13 +277,13 @@ with tab1:
     st.subheader("Compressão Semântica")
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        st.metric("Pixels por Imagem", "784")
+        st.metric("Pixels por Imagem", str(PIXELS_PER_IMAGE))
     with m2:
-        st.metric("Dimensão Latente", "32")
+        st.metric("Dimensão Latente", str(LATENT_DIM))
     with m3:
-        st.metric("Fator de Compressão", "24.5×")
+        st.metric("Fator de Compressão", f"{PIXELS_PER_IMAGE / LATENT_DIM:.1f}×")
     with m4:
-        st.metric("Redução", "95.9%")
+        st.metric("Redução", f"{(1 - LATENT_DIM / PIXELS_PER_IMAGE) * 100:.1f}%")
 
 
 # ============================================================
@@ -290,7 +299,7 @@ with tab2:
     if not IMPORTS_OK:
         st.error("Erro ao importar módulos do projeto.")
     else:
-        comm_mode = st.radio("Modo:", ["Imagem única", "Todos os 10 dígitos"], horizontal=True)
+        comm_mode = st.radio("Modo:", ["Imagem única", f"Todas as {len(CLASS_NAMES)} classes"], horizontal=True)
         
         if comm_mode == "Imagem única" and st.button("🎲 Gerar Nova Imagem", key="comm_btn"):
             if os.path.exists("global_model.pth"):
@@ -299,7 +308,7 @@ with tab2:
                     model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
                     model.eval()
 
-                    dataset = load_mnist(train=False)
+                    dataset = load_dataset(train=False)
                     idx = torch.randint(0, len(dataset), (1,)).item()
                     original, label = dataset[idx]
                     original = original.unsqueeze(0)
@@ -315,51 +324,51 @@ with tab2:
 
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.markdown("**Original (784 valores)**")
-                        st.image(original.squeeze().numpy(), width=200, clamp=True)
-                        st.caption(f"Dígito: {label}")
+                        st.markdown(f"**Original ({PIXELS_PER_IMAGE} valores)**")
+                        st.image(format_image_for_ui(original), width=200, clamp=True)
+                        st.caption(f"{LABEL_KIND.title()}: {label_to_name(label)}")
 
                     with col2:
-                        st.markdown("**Vetor Latente (32 valores)**")
+                        st.markdown(f"**Vetor Latente ({LATENT_DIM} valores)**")
                         st.bar_chart(latent.squeeze().numpy(), height=200)
                         st.caption(f"Apenas {latent.numel()} números transmitidos")
 
                     with col3:
-                        st.markdown("**Reconstruído (784 valores)**")
-                        st.image(reconstructed.squeeze().numpy(), width=200, clamp=True)
+                        st.markdown(f"**Reconstruído ({PIXELS_PER_IMAGE} valores)**")
+                        st.image(format_image_for_ui(reconstructed), width=200, clamp=True)
                         mse = compute_mse(original, reconstructed)
                         psnr = compute_psnr(original, reconstructed)
                         ssim = compute_ssim(original, reconstructed)
                         st.caption(f"MSE: {mse:.6f} | PSNR: {psnr:.1f} dB | SSIM: {ssim:.4f}")
 
-                    st.success(f"📡 Compressão: 784 → 32 valores = **{784/32:.0f}x** de redução ({(1-32/784)*100:.1f}%)")
+                    st.success(f"📡 Compressão: {PIXELS_PER_IMAGE} → {LATENT_DIM} valores = **{PIXELS_PER_IMAGE / LATENT_DIM:.1f}x** de redução ({(1 - LATENT_DIM / PIXELS_PER_IMAGE) * 100:.1f}%)")
                 except Exception as e:
                     st.error(f"Erro: {e}")
             else:
                 st.warning("⏳ Modelo global ainda não disponível. Inicie o treinamento primeiro.")
         
-        elif comm_mode == "Todos os 10 dígitos" and st.button("🔟 Testar Todos os Dígitos", key="all_digits_btn"):
+        elif comm_mode == f"Todas as {len(CLASS_NAMES)} classes" and st.button("🧾 Testar Classes", key="all_digits_btn"):
             if os.path.exists("global_model.pth"):
                 try:
                     model = get_model(MODEL_TYPE, LATENT_DIM)
                     model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
                     model.eval()
                     
-                    dataset = load_mnist(train=False)
+                    dataset = load_dataset(train=False)
                     digit_examples = {}
                     for i in range(len(dataset)):
                         img, lbl = dataset[i]
                         if lbl not in digit_examples:
                             digit_examples[lbl] = img
-                        if len(digit_examples) == 10:
+                        if len(digit_examples) == len(CLASS_NAMES):
                             break
                     
-                    fig, axes = plt.subplots(2, 10, figsize=(16, 4))
+                    fig, axes = plt.subplots(2, len(CLASS_NAMES), figsize=(18, 4))
                     total_mse = 0
                     total_psnr = 0
                     total_ssim = 0
                     
-                    for d in range(10):
+                    for d in range(len(CLASS_NAMES)):
                         img = digit_examples[d].unsqueeze(0)
                         with torch.no_grad():
                             output = model(img)
@@ -372,11 +381,16 @@ with tab2:
                         total_psnr += psnr
                         total_ssim += ssim
                         
-                        axes[0, d].imshow(img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
-                        axes[0, d].set_title(f"{d}", fontsize=12, fontweight='bold')
+                        original_image = format_image_for_ui(img)
+                        reconstructed_image = format_image_for_ui(recon)
+                        if original_image.ndim == 2:
+                            axes[0, d].imshow(original_image, cmap='gray', vmin=0, vmax=1)
+                            axes[1, d].imshow(reconstructed_image, cmap='gray', vmin=0, vmax=1)
+                        else:
+                            axes[0, d].imshow(original_image)
+                            axes[1, d].imshow(reconstructed_image)
+                        axes[0, d].set_title(label_to_name(d), fontsize=9, fontweight='bold')
                         axes[0, d].axis('off')
-                        
-                        axes[1, d].imshow(recon.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
                         axes[1, d].set_title(f"{psnr:.0f}dB", fontsize=9, color='green')
                         axes[1, d].axis('off')
                     
@@ -386,7 +400,7 @@ with tab2:
                     st.pyplot(fig)
                     plt.close(fig)
                     
-                    st.success(f"📊 Média: MSE={total_mse/10:.4f} | PSNR={total_psnr/10:.1f} dB | SSIM={total_ssim/10:.4f} | Compressão: 24.5×")
+                    st.success(f"📊 Média: MSE={total_mse/len(CLASS_NAMES):.4f} | PSNR={total_psnr/len(CLASS_NAMES):.1f} dB | SSIM={total_ssim/len(CLASS_NAMES):.4f} | Compressão: {PIXELS_PER_IMAGE / LATENT_DIM:.1f}×")
                 except Exception as e:
                     st.error(f"Erro: {e}")
             else:
@@ -414,7 +428,7 @@ with tab3:
                 model.load_state_dict(torch.load("global_model.pth", map_location="cpu", weights_only=True))
                 model.eval()
 
-                dataset = load_mnist(train=False)
+                dataset = load_dataset(train=False)
                 idx = torch.randint(0, len(dataset), (1,)).item()
                 original, label = dataset[idx]
                 original = original.unsqueeze(0)
@@ -433,17 +447,17 @@ with tab3:
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     st.markdown("**Original**")
-                    st.image(original.squeeze().numpy(), width=200, clamp=True)
-                    st.caption(f"Dígito: {label}")
+                    st.image(format_image_for_ui(original), width=200, clamp=True)
+                    st.caption(f"{LABEL_KIND.title()}: {label_to_name(label)}")
 
                 with col2:
                     st.markdown(f"**Enviado ({(1-mask_pct)*100:.0f}% da imagem)**")
-                    st.image(masked.squeeze().numpy(), width=200, clamp=True)
+                    st.image(format_image_for_ui(masked), width=200, clamp=True)
                     st.caption(f"Máscara: {mask_type}")
 
                 with col3:
                     st.markdown("**Completado pelo Modelo**")
-                    st.image(completed.squeeze().numpy(), width=200, clamp=True)
+                    st.image(format_image_for_ui(completed), width=200, clamp=True)
                     mse = compute_mse(original, completed)
                     psnr = compute_psnr(original, completed)
                     ssim = compute_ssim(original, completed)
