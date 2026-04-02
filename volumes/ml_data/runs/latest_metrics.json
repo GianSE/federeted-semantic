@@ -1,0 +1,72 @@
+{
+  "experiment_id": "experimento_20260402_031849",
+  "dataset": "mnist",
+  "model": "ae",
+  "distribution": "iid",
+  "clients": 3,
+  "noise": {
+    "channel": 0,
+    "packet_loss": 0,
+    "latency": 0,
+    "client_drift": 0
+  },
+  "awgn": {
+    "enabled": true,
+    "snr_db": 10.0
+  },
+  "final_loss": 0.5824,
+  "final_accuracy": 0.3586,
+  "timestamp": 1775099940,
+  "history": [
+    {
+      "epoch": 1,
+      "loss": 0.9798,
+      "accuracy": 0.2189
+    },
+    {
+      "epoch": 2,
+      "loss": 0.9193,
+      "accuracy": 0.241
+    },
+    {
+      "epoch": 3,
+      "loss": 0.8805,
+      "accuracy": 0.2468
+    },
+    {
+      "epoch": 4,
+      "loss": 0.8463,
+      "accuracy": 0.2682
+    },
+    {
+      "epoch": 5,
+      "loss": 0.777,
+      "accuracy": 0.2982
+    },
+    {
+      "epoch": 6,
+      "loss": 0.7172,
+      "accuracy": 0.2962
+    },
+    {
+      "epoch": 7,
+      "loss": 0.6952,
+      "accuracy": 0.3149
+    },
+    {
+      "epoch": 8,
+      "loss": 0.6635,
+      "accuracy": 0.3316
+    },
+    {
+      "epoch": 9,
+      "loss": 0.6322,
+      "accuracy": 0.3291
+    },
+    {
+      "epoch": 10,
+      "loss": 0.5824,
+      "accuracy": 0.3586
+    }
+  ]
+}

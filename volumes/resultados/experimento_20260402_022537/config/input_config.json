@@ -1,0 +1,12 @@
+{
+  "experiment_id": "experimento_20260402_022537",
+  "dataset": "mnist",
+  "model": "cnn",
+  "clients": 4,
+  "noise": {
+    "channel": 0,
+    "packet_loss": 0,
+    "latency": 0,
+    "client_drift": 0
+  }
+}

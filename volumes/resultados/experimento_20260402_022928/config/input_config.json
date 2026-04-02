@@ -1,0 +1,17 @@
+{
+  "experiment_id": "experimento_20260402_022928",
+  "dataset": "cifar100",
+  "model": "cnn_vae",
+  "distribution": "non_iid",
+  "clients": 2,
+  "noise": {
+    "latency": 90,
+    "channel": 8,
+    "packet_loss": 3,
+    "client_drift": 5
+  },
+  "awgn": {
+    "enabled": true,
+    "snr_db": 8.0
+  }
+}

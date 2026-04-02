@@ -1,0 +1,20 @@
+{
+  "experiment_id": "experimento_20260402_030552",
+  "dataset": "mnist",
+  "model": "ae",
+  "distribution": "iid",
+  "clients": 2,
+  "noise": {
+    "latency": 0,
+    "channel": 0,
+    "packet_loss": 0,
+    "client_drift": 0
+  },
+  "awgn": {
+    "enabled": false,
+    "snr_db": null
+  },
+  "final_loss": 0.6354,
+  "final_accuracy": 0.3308,
+  "timestamp": 1775099155
+}

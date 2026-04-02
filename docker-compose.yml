@@ -1,0 +1,73 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: semantic_frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "5180:80"
+    environment:
+      - VITE_API_BASE_URL=/api
+    networks:
+      - semantic_net
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: semantic_backend
+    depends_on:
+      ml-service:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - ML_SERVICE_URL=http://ml-service:8000
+      - RESULTADOS_DIR=/resultados
+    volumes:
+      - ./volumes/resultados:/resultados
+    ports:
+      - "3000:3000"
+    networks:
+      - semantic_net
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+    restart: unless-stopped
+
+  ml-service:
+    build:
+      context: ./ml-service
+      dockerfile: Dockerfile
+    container_name: semantic_ml_service
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PORT=8000
+      - DATA_ROOT=/ml-data
+      - DATASETS_DIR=/ml-data/datasets
+      - RUNS_DIR=/ml-data/runs
+      - LOGS_DIR=/ml-data/logs
+      - RESULTADOS_ROOT=/resultados
+    volumes:
+      - ./volumes/ml_data:/ml-data
+      - ./volumes/resultados:/resultados
+    expose:
+      - "8000"
+    networks:
+      - semantic_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+networks:
+  semantic_net:
+    driver: bridge

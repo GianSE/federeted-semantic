@@ -1,0 +1,19 @@
+@import url("https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font-family: "Fira Code", monospace;
+  background: radial-gradient(circle at 20% 10%, #0f2530 0%, #070b11 45%, #05070a 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
