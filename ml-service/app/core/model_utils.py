@@ -28,7 +28,8 @@ def build_simple_backbone(input_channels, output_channels, image_size):
         nn.ConvTranspose2d(32, output_channels, kernel_size=3, stride=2, padding=1, output_padding=1),
         nn.Sigmoid(),
     )
-    return encoder, decoder, 64, image_size // 4, 256, 64
+    fe_size = image_size // 4
+    return encoder, decoder, 64, fe_size, 256, 64
 
 def build_backbone(input_channels, output_channels, image_size):
     return build_simple_backbone(input_channels, output_channels, image_size)

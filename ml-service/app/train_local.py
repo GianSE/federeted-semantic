@@ -47,6 +47,7 @@ def train_model(dataset_name="fashion", model_type="cnn_vae", epochs=5):
     print(f"Pesos salvos em {save_path} com sucesso.")
 
 if __name__ == "__main__":
+    train_model("cifar10", "cnn_vae", epochs=5)
     train_model("fashion", "cnn_vae", epochs=5)
     train_model("fashion", "cnn_ae", epochs=5)
     train_model("mnist", "cnn_vae", epochs=3)

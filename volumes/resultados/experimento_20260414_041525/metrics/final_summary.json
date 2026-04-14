@@ -1,0 +1,20 @@
+{
+  "experiment_id": "experimento_20260414_041525",
+  "dataset": "fashion",
+  "model": "cnn_vae",
+  "distribution": "iid",
+  "clients": 3,
+  "noise": {
+    "channel": 0,
+    "packet_loss": 0,
+    "latency": 0,
+    "client_drift": 0
+  },
+  "awgn": {
+    "enabled": false,
+    "snr_db": 10.0
+  },
+  "final_loss": 0.3569,
+  "final_accuracy": 0.6413,
+  "timestamp": 1776140152
+}

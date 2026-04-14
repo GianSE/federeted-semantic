@@ -45,23 +45,39 @@ export default function SemanticCommsPage() {
 
   function renderImage(tensorData, label) {
     if (!tensorData) return null;
+    let isRGB = false;
+    let height = tensorData.length;
+    let width = tensorData[0]?.length || 28;
+    
+    // Suporte ao CIFAR-10 RGB (Tensor retorna [3, H, W])
+    if (tensorData.length === 3 && Array.isArray(tensorData[0][0])) {
+       isRGB = true;
+       height = tensorData[0].length;
+       width = tensorData[0][0].length;
+    }
+
+    const pixels = [];
+    for (let i = 0; i < height; i++) {
+      for (let j = 0; j < width; j++) {
+         if (isRGB) {
+             const r = Math.floor(Math.max(0, Math.min(1, tensorData[0][i][j])) * 255);
+             const g = Math.floor(Math.max(0, Math.min(1, tensorData[1][i][j])) * 255);
+             const b = Math.floor(Math.max(0, Math.min(1, tensorData[2][i][j])) * 255);
+             pixels.push(<div key={`${i}-${j}`} style={{ backgroundColor: `rgb(${r},${g},${b})`, width: 4, height: 4 }} />);
+         } else {
+             const val = Math.floor(Math.max(0, Math.min(1, tensorData[i][j])) * 255);
+             pixels.push(<div key={`${i}-${j}`} style={{ backgroundColor: `rgb(${val},${val},${val})`, width: 4, height: 4 }} />);
+         }
+      }
+    }
+
     return (
       <div className="flex flex-col items-center">
         <div 
           className="grid gap-[1px] bg-slate-800 p-[1px] rounded"
-          style={{ gridTemplateColumns: `repeat(${tensorData[0]?.length || 28}, minmax(0, 1fr))` }}
+          style={{ gridTemplateColumns: `repeat(${width}, minmax(0, 1fr))` }}
         >
-          {tensorData.map((row, i) =>
-            row.map((pixel, j) => {
-              const val = Math.floor(Math.max(0, Math.min(1, pixel)) * 255);
-              return (
-                <div
-                  key={`${i}-${j}`}
-                  style={{ backgroundColor: `rgb(${val},${val},${val})`, width: 4, height: 4 }}
-                />
-              );
-            })
-          )}
+          {pixels}
         </div>
         {label !== undefined && <span className="mt-2 text-xs text-slate-400 font-mono">Classe: {label}</span>}
       </div>
@@ -80,6 +96,7 @@ export default function SemanticCommsPage() {
             <select className="w-full rounded-md border border-line bg-[#0b1220] px-3 py-2" value={dataset} onChange={e => setDataset(e.target.value)}>
               <option value="fashion">Fashion-MNIST</option>
               <option value="mnist">MNIST Clássico</option>
+              <option value="cifar10">CIFAR-10 Colorido (32x32)</option>
             </select>
           </div>
           <div className="flex-1 max-w-xs">

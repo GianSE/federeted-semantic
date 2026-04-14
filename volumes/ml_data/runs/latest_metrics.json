@@ -1,7 +1,7 @@
 {
-  "experiment_id": "experimento_20260402_031849",
-  "dataset": "mnist",
-  "model": "ae",
+  "experiment_id": "experimento_20260414_041643",
+  "dataset": "fashion",
+  "model": "cnn_vae",
   "distribution": "iid",
   "clients": 3,
   "noise": {
@@ -14,59 +14,59 @@
     "enabled": true,
     "snr_db": 10.0
   },
-  "final_loss": 0.5824,
-  "final_accuracy": 0.3586,
-  "timestamp": 1775099940,
+  "final_loss": 0.8921,
+  "final_accuracy": 0.3635,
+  "timestamp": 1776140230,
   "history": [
     {
       "epoch": 1,
-      "loss": 0.9798,
-      "accuracy": 0.2189
+      "loss": 1.2638,
+      "accuracy": 0.2563
     },
     {
       "epoch": 2,
-      "loss": 0.9193,
-      "accuracy": 0.241
+      "loss": 1.1854,
+      "accuracy": 0.2722
     },
     {
       "epoch": 3,
-      "loss": 0.8805,
-      "accuracy": 0.2468
+      "loss": 1.1335,
+      "accuracy": 0.2624
     },
     {
       "epoch": 4,
-      "loss": 0.8463,
-      "accuracy": 0.2682
+      "loss": 1.0977,
+      "accuracy": 0.2865
     },
     {
       "epoch": 5,
-      "loss": 0.777,
-      "accuracy": 0.2982
+      "loss": 1.0321,
+      "accuracy": 0.3167
     },
     {
       "epoch": 6,
-      "loss": 0.7172,
-      "accuracy": 0.2962
+      "loss": 0.983,
+      "accuracy": 0.3236
     },
     {
       "epoch": 7,
-      "loss": 0.6952,
-      "accuracy": 0.3149
+      "loss": 0.9928,
+      "accuracy": 0.3602
     },
     {
       "epoch": 8,
-      "loss": 0.6635,
-      "accuracy": 0.3316
+      "loss": 0.9514,
+      "accuracy": 0.3585
     },
     {
       "epoch": 9,
-      "loss": 0.6322,
-      "accuracy": 0.3291
+      "loss": 0.9056,
+      "accuracy": 0.3496
     },
     {
       "epoch": 10,
-      "loss": 0.5824,
-      "accuracy": 0.3586
+      "loss": 0.8921,
+      "accuracy": 0.3635
     }
   ]
 }

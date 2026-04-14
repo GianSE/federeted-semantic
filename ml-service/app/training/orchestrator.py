@@ -15,7 +15,6 @@ from app.core.config import RESULTADOS_ROOT
 
 class TrainingOrchestrator:
     def __init__(self) -> None:
-        self._queues: dict[str, Queue] = {}
         self._lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._latest_experiment_id: str | None = None
@@ -24,11 +23,6 @@ class TrainingOrchestrator:
         self._pause_event = threading.Event()
         self._stop_event = threading.Event()
         self._active_clients = 0
-
-    def _get_queue(self, target: str) -> Queue:
-        if target not in self._queues:
-            self._queues[target] = Queue()
-        return self._queues[target]
 
     def start(self, dataset: str, model: str, distribution: str, noise: dict, awgn: dict, clients: int) -> dict:
         with self._state_lock:
@@ -116,24 +110,14 @@ class TrainingOrchestrator:
         with self._state_lock:
             max_clients = clients if clients is not None else self._active_clients
 
-        # Clear in-memory queues without replacing queue objects used by stream consumers.
         targets = ["server"] + [f"client-{i}" for i in range(1, max(0, max_clients) + 1)]
         for target in list(set(targets)):
-            queue = self._get_queue(target)
-            while True:
-                try:
-                    queue.get_nowait()
-                except Empty:
-                    break
-
             log_file = LOGS_DIR / f"training_{target}.log"
             log_file.write_text("", encoding="utf-8")
 
         return {"status": "logs_cleared", "targets": targets}
 
     def _emit(self, target: str, message: str) -> None:
-        queue = self._get_queue(target)
-        queue.put(message)
         log_file = LOGS_DIR / f"training_{target}.log"
         with log_file.open("a", encoding="utf-8") as f:
             f.write(message + "\n")
@@ -368,8 +352,16 @@ class TrainingOrchestrator:
                 client_losses = []
                 client_accs = []
 
+                self._emit("server", f"[round {rnd:02d}] broadcasting global weights to {clients} edge nodes...")
+                time.sleep(0.5)
+
                 for client_idx in range(1, clients + 1):
+                    if self._stop_event.is_set():
+                        stopped_early = True
+                        break
+                        
                     target = f"client-{client_idx}"
+                    self._emit(target, f"[round {rnd:02d}] receiving global weights... starting local epoch(s)")
                     drift = float(noise.get("client_drift", 0)) / 100.0
                     channel = float(noise.get("channel", 0)) / 100.0
                     packet_loss = float(noise.get("packet_loss", 0)) / 100.0
@@ -394,11 +386,25 @@ class TrainingOrchestrator:
                         - awgn_penalty * 0.3,
                     )
 
+                    for _ in range(10): # Break down sleep for instant stop
+                        if self._stop_event.is_set(): break
+                        time.sleep(random.uniform(0.01, 0.04))
+                        
                     client_losses.append(local_loss)
                     client_accs.append(local_acc)
-                    self._emit(target, f"[round {rnd:02d}] local_loss={local_loss:.4f} local_acc={local_acc:.4f}")
+                    self._emit(target, f"[round {rnd:02d}] local_loss={local_loss:.4f} local_acc={local_acc:.4f} -> transferring gradients")
+                    self._emit("server", f"[round {rnd:02d}] incoming gradients strictly received from client-{client_idx}")
+
+                if self._stop_event.is_set():
+                    stopped_early = True
+                    self._emit("server", "[stopped] training interrupted by user")
+                    break
 
                 latency_penalty = float(noise.get("latency", 0)) / 1500.0
+                time.sleep(random.uniform(0.2, 0.6) * (1.0 + latency_penalty))
+                
+                self._emit("server", f"[round {rnd:02d}] performing FedAvg aggregation...")
+                
                 global_loss = max(0.015, (sum(client_losses) / len(client_losses)) * (1.0 + latency_penalty))
                 global_accuracy = min(0.995, max(0.01, (sum(client_accs) / len(client_accs)) * (1.0 - packet_loss * 0.05)))
 
@@ -409,7 +415,7 @@ class TrainingOrchestrator:
                         "accuracy": round(global_accuracy, 4),
                     }
                 )
-                self._emit("server", f"[round {rnd:02d}] global_loss={global_loss:.4f} global_acc={global_accuracy:.4f}")
+                self._emit("server", f"[round {rnd:02d}] global_loss={global_loss:.4f} global_acc={global_accuracy:.4f} (Finished)")
 
             metrics = {
                 "experiment_id": experiment_id,
@@ -448,13 +454,21 @@ class TrainingOrchestrator:
             self._pause_event.clear()
 
     def stream(self, target: str):
-        queue = self._get_queue(target)
-        while True:
-            try:
-                message = queue.get(timeout=10)
-                yield message
-            except Empty:
-                yield f"[heartbeat] waiting for new logs on {target}..."
+        log_file = LOGS_DIR / f"training_{target}.log"
+        if not log_file.exists():
+            log_file.write_text("", encoding="utf-8")
+            
+        with open(log_file, "r", encoding="utf-8") as f:
+            while True:
+                line = f.readline()
+                if not line:
+                    if not self._running:
+                        time.sleep(1)
+                        yield f"[heartbeat] waiting for new logs on {target}..."
+                        continue
+                    time.sleep(0.5)
+                    continue
+                yield line.strip()
 
 
 orchestrator = TrainingOrchestrator()
