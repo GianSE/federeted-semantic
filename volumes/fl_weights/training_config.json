@@ -1,0 +1,7 @@
+{
+  "dataset": "fashion",
+  "model": "cnn_vae",
+  "clients": 2,
+  "epochs": 3,
+  "rounds": 5
+}

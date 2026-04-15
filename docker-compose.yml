@@ -1,4 +1,5 @@
 services:
+  # ── Front-end ────────────────────────────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
@@ -15,6 +16,7 @@ services:
       - semantic_net
     restart: unless-stopped
 
+  # ── Back-end (API Gateway) ────────────────────────────────────────────────────
   backend:
     build:
       context: ./backend
@@ -27,6 +29,7 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - ML_SERVICE_URL=http://ml-service:8000
+      - FL_SERVER_URL=http://fl-server:8100
       - RESULTADOS_DIR=/resultados
     volumes:
       - ./volumes/resultados:/resultados
@@ -41,6 +44,7 @@ services:
       retries: 8
     restart: unless-stopped
 
+  # ── ML Inference Service ──────────────────────────────────────────────────────
   ml-service:
     build:
       context: ./ml-service
@@ -54,9 +58,12 @@ services:
       - RUNS_DIR=/ml-data/runs
       - LOGS_DIR=/ml-data/logs
       - RESULTADOS_ROOT=/resultados
+      - FL_SERVER_URL=http://fl-server:8100
+      - FL_WEIGHTS_DIR=/fl-weights
     volumes:
       - ./volumes/ml_data:/ml-data
       - ./volumes/resultados:/resultados
+      - ./volumes/fl_weights:/fl-weights
     expose:
       - "8000"
     networks:
@@ -66,6 +73,106 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+
+  # ── Federated Learning Server ─────────────────────────────────────────────────
+  fl-server:
+    build:
+      context: .                      # project root — needed to COPY from ml-service/
+      dockerfile: fl-server/Dockerfile
+    container_name: fl_server
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FL_WEIGHTS_DIR=/fl-weights
+      - ML_DATA_DIR=/ml-data
+    volumes:
+      - ./volumes/ml_data:/ml-data
+      - ./volumes/fl_weights:/fl-weights
+    expose:
+      - "8100"
+    networks:
+      - semantic_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8100/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Federated Learning Client 1 ───────────────────────────────────────────────
+  fl-client-1:
+    build:
+      context: .
+      dockerfile: fl-client/Dockerfile
+    container_name: fl_client_1
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CLIENT_ID=1
+      - N_CLIENTS=3
+      - FL_SERVER_URL=http://fl-server:8100
+      - FL_WEIGHTS_DIR=/fl-weights
+      - ML_DATA_DIR=/ml-data
+    volumes:
+      - ./volumes/ml_data:/ml-data
+      - ./volumes/fl_weights:/fl-weights
+    expose:
+      - "8200"
+    networks:
+      - semantic_net
+    depends_on:
+      fl-server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Federated Learning Client 2 ───────────────────────────────────────────────
+  fl-client-2:
+    build:
+      context: .
+      dockerfile: fl-client/Dockerfile
+    container_name: fl_client_2
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CLIENT_ID=2
+      - N_CLIENTS=3
+      - FL_SERVER_URL=http://fl-server:8100
+      - FL_WEIGHTS_DIR=/fl-weights
+      - ML_DATA_DIR=/ml-data
+    volumes:
+      - ./volumes/ml_data:/ml-data
+      - ./volumes/fl_weights:/fl-weights
+    expose:
+      - "8200"
+    networks:
+      - semantic_net
+    depends_on:
+      fl-server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Federated Learning Client 3 ───────────────────────────────────────────────
+  fl-client-3:
+    build:
+      context: .
+      dockerfile: fl-client/Dockerfile
+    container_name: fl_client_3
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CLIENT_ID=3
+      - N_CLIENTS=3
+      - FL_SERVER_URL=http://fl-server:8100
+      - FL_WEIGHTS_DIR=/fl-weights
+      - ML_DATA_DIR=/ml-data
+    volumes:
+      - ./volumes/ml_data:/ml-data
+      - ./volumes/fl_weights:/fl-weights
+      - ./volumes/ml_data:/ml-data
+    expose:
+      - "8200"
+    networks:
+      - semantic_net
+    depends_on:
+      fl-server:
+        condition: service_healthy
     restart: unless-stopped
 
 networks:

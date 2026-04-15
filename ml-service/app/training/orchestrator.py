@@ -404,218 +404,169 @@ class TrainingOrchestrator:
 
     def _run_real_training(self, dataset: str, model: str, clients: int, epochs: int, noise: dict, awgn: dict) -> None:
         """
-        Real Federated Averaging (FedAvg) with actual PyTorch gradients.
+        Container-based FedAvg: delegates training to dedicated fl-server + fl-client containers.
 
-        Protocol (McMahan et al., 2017):
-          For each communication round:
-            1. Server broadcasts W_global to ALL clients simultaneously.
-            2. ALL clients train on their own data shard IN PARALLEL
-               (ThreadPoolExecutor -- PyTorch releases the GIL during tensor
-               ops, so threads run concurrently).
-            3. Server aggregates: W_new = mean(W_1, ..., W_N)
-          Repeat for NUM_ROUNDS rounds.
+        Architecture:
+          fl-server  (container) - coordinates rounds, does FedAvg aggregation
+          fl-client-1 ... fl-client-N  (containers) - train locally in true parallel
+          ml-service (this container) - proxies logs from all containers to the dashboard SSE
+
+        Communication:
+          ml-service  ->  fl-server: POST /training/start
+          fl-server   ->  fl-clients: shared Docker volume /fl-weights/ (weight files)
+          fl-clients  ->  fl-server:  POST /round/submit/{client_id}
+          ml-service  polls /logs from each container and re-emits via self._emit()
+
+        After training, the fl-server saves the aggregated model to the shared
+        /ml-data/weights/ volume, which is also mounted by ml-service, so
+        /semantic and /benchmark endpoints pick up the new weights automatically.
         """
-        import copy
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import requests as _req
 
-        import torch
-        import torch.nn as nn
-        import torch.optim as optim
-        from torch.utils.data import DataLoader, Subset
-
-        from app.core.image_utils import load_dataset, DATASET_META
-        from app.core.model_utils import get_model
-        from app.train_local import set_seed
-
+        FL_SERVER = os.environ.get("FL_SERVER_URL", "http://fl-server:8100")
         NUM_ROUNDS = 5
 
         with self._lock:
             experiment_id, experiment_dir = self._new_experiment_dir()
-            self._latest_experiment_id = experiment_id
+            self._latest_experiment_id   = experiment_id
             awgn_enabled = bool(awgn.get("enabled", False))
-            awgn_snr = awgn.get("snr_db")
+            awgn_snr     = awgn.get("snr_db")
 
             self._write_json(
                 experiment_dir / "config" / "input_config.json",
                 {
                     "experiment_id": experiment_id,
-                    "dataset": dataset,
-                    "model": model,
-                    "mode": "real_fedavg",
-                    "clients": clients,
-                    "rounds": NUM_ROUNDS,
+                    "dataset":      dataset,
+                    "model":        model,
+                    "mode":         "real_fedavg_containers",
+                    "clients":      clients,
+                    "rounds":       NUM_ROUNDS,
                     "epochs_per_round": epochs,
-                    "noise": noise,
-                    "awgn": {"enabled": awgn_enabled, "snr_db": awgn_snr},
+                    "noise":        noise,
+                    "awgn":         {"enabled": awgn_enabled, "snr_db": awgn_snr},
                 },
             )
 
-            self._emit("server", "==================================================")
-            self._emit("server", "  MODO REAL: FedAvg c/ PyTorch - clientes paralelos")
-            self._emit("server", "==================================================")
-            self._emit("server", f"[init] dataset={dataset} | model={model} | clients={clients} | rounds={NUM_ROUNDS} | epochs/round={epochs}")
+            self._emit("server", "=================================================")
+            self._emit("server", "  FEDERATED LEARNING — REAL MODE (containers)")
+            self._emit("server", "=================================================")
+            self._emit("server", f"[init] dataset={dataset} | model={model} | clients={clients}")
+            self._emit("server", f"[init] rounds={NUM_ROUNDS} | epochs/round={epochs}")
+            self._emit("server", f"[init] fl-server: {FL_SERVER}")
             self._emit("server", f"[exp] id={experiment_id}")
-            self._emit("server", "[info] A cada round, TODOS os clientes treinam em PARALELO")
-            self._emit("server", "[info] Server agrega os pesos (FedAvg) ao final de cada round")
 
-            set_seed(42)
-            meta      = DATASET_META.get(dataset, DATASET_META["mnist"])
-            channels  = meta["channels"]
-            img_size  = meta["height"]
-            pixels_pp = channels * meta["height"] * meta["width"]
-            kl_weight = 0.005
-            device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            self._emit("server", f"[device] {device}")
-
+            # ── Connect to fl-server ──────────────────────────────────────
             try:
-                full_dataset = load_dataset(dataset, train=True)
+                r = _req.get(f"{FL_SERVER}/health", timeout=5)
+                if not r.ok:
+                    raise RuntimeError(f"fl-server health check failed: {r.status_code}")
+                self._emit("server", "[ok] fl-server is reachable")
             except Exception as exc:
-                self._emit("server", f"[error] falha ao carregar dataset: {exc}")
+                self._emit("server", f"[error] Cannot reach fl-server: {exc}")
+                self._emit("server", "[error] Make sure all containers are running:")
+                self._emit("server", "[error]   docker compose up --build -d")
                 with self._state_lock:
                     self._running = False
                     self._real_training = False
                 return
 
-            total      = len(full_dataset)
-            shard_sz   = total // clients
-            shards     = []
-            for i in range(clients):
-                start = i * shard_sz
-                end   = start + shard_sz if i < clients - 1 else total
-                shards.append(Subset(full_dataset, list(range(start, end))))
-            self._emit("server", f"[data] {total} amostras | {clients} shards de ~{shard_sz} cada (IID)")
+            # ── Start training on fl-server ───────────────────────────────
+            try:
+                r = _req.post(
+                    f"{FL_SERVER}/training/start",
+                    json={"dataset": dataset, "model": model, "clients": clients,
+                          "epochs": epochs, "rounds": NUM_ROUNDS},
+                    timeout=10,
+                )
+                if not r.ok:
+                    raise RuntimeError(f"{r.status_code}: {r.text}")
+                self._emit("server", "[ok] fl-server accepted training request")
+            except Exception as exc:
+                self._emit("server", f"[error] Failed to start fl-server training: {exc}")
+                with self._state_lock:
+                    self._running = False
+                    self._real_training = False
+                return
 
-            weights_path = f"app/core/{dataset}_{model}.pth"
-            global_model = get_model(model, latent_dim=32, input_channels=channels, image_size=img_size)
-            if os.path.exists(weights_path):
-                global_model.load_state_dict(torch.load(weights_path, map_location="cpu", weights_only=True))
-                self._emit("server", f"[init] pesos carregados de {weights_path}")
-            else:
-                self._emit("server", "[init] pesos aleatorios (sem .pth pre-existente)")
+            # ── Poll logs from fl-server + each fl-client ─────────────────
+            log_offsets   = {"server": 0}
+            client_urls   = {}
+            for i in range(1, clients + 1):
+                log_offsets[f"client-{i}"] = 0
+                client_urls[f"client-{i}"] = f"http://fl-client-{i}:8200"
 
-            history       = []
-            global_loss   = 9.999
-            stopped_early = False
+            history     = []
+            global_loss = 9.999
 
-            # ── FedAvg rounds ──────────────────────────────────────────────
-            for rnd in range(1, NUM_ROUNDS + 1):
-                if self._stop_event.is_set():
-                    stopped_early = True
-                    self._emit("server", "[stopped] interrompido pelo usuario")
-                    break
-                self._pause_event.wait()
-                if self._stop_event.is_set():
-                    stopped_early = True
-                    self._emit("server", "[stopped] interrompido pelo usuario")
-                    break
+            while not self._stop_event.is_set():
+                # ── Fetch fl-server status ────────────────────────────────
+                try:
+                    st = _req.get(f"{FL_SERVER}/training/status", timeout=5).json()
+                    state = st.get("state", "idle")
+                    if st.get("history"):
+                        history = st["history"]
+                        global_loss = history[-1]["loss"]
+                except Exception:
+                    state = "unknown"
 
-                self._emit("server", f"[ROUND {rnd}/{NUM_ROUNDS}] broadcasting W_global a {clients} clientes...")
-                gs = copy.deepcopy(global_model.state_dict())
+                # ── Relay fl-server logs ──────────────────────────────────
+                try:
+                    logs_r = _req.get(
+                        f"{FL_SERVER}/logs?since={log_offsets['server']}", timeout=5
+                    ).json()
+                    for line in logs_r.get("lines", []):
+                        self._emit("server", line)
+                    log_offsets["server"] = logs_r.get("total", log_offsets["server"])
+                except Exception:
+                    pass
 
-                def train_client(ci: int, _rnd: int = rnd, _gs: dict = gs) -> tuple:
-                    tgt = f"client-{ci}"
-                    torch.manual_seed(42 + ci * 100 + _rnd * 10)
-                    lm = get_model(model, latent_dim=32, input_channels=channels, image_size=img_size)
-                    lm.load_state_dict(copy.deepcopy(_gs))
-                    lm = lm.to(device)
-                    loader = DataLoader(shards[ci - 1], batch_size=128, shuffle=True, num_workers=0)
-                    opt    = optim.Adam(lm.parameters(), lr=1e-3)
-                    crit   = nn.MSELoss()
-                    lm.train()
-                    self._emit(tgt, f"[R{_rnd}] pesos recebidos | shard={len(shards[ci-1])} amostras | {epochs} epocas")
-                    last_avg = 0.0
-                    for ep in range(epochs):
-                        if self._stop_event.is_set():
-                            break
-                        run2 = cnt = 0
-                        for bi, (data, _) in enumerate(loader):
-                            if self._stop_event.is_set():
-                                break
-                            data = data.to(device)
-                            opt.zero_grad()
-                            if model == "cnn_vae":
-                                recon, mu, logvar = lm(data)
-                                rloss = crit(recon, data)
-                                kld   = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-                                kld  /= data.size(0) * pixels_pp
-                                loss  = rloss + kl_weight * kld
-                            else:
-                                recon = lm(data)
-                                loss  = crit(recon, data)
-                            loss.backward()
-                            opt.step()
-                            run2 += loss.item()
-                            cnt  += 1
-                            if bi % 60 == 0:
-                                self._emit(tgt, f"[R{_rnd} ep{ep+1}/{epochs}] b{bi}/{len(loader)} loss={loss.item():.5f}")
-                        last_avg = run2 / max(cnt, 1)
-                        self._emit(tgt, f"[R{_rnd} ep{ep+1}/{epochs}] concluida avg={last_avg:.5f}")
-                    self._emit(tgt, f"[R{_rnd}] enviando W_local ao servidor")
-                    return ci, lm.state_dict(), last_avg
+                # ── Relay each client's logs ──────────────────────────────
+                for i in range(1, clients + 1):
+                    key = f"client-{i}"
+                    try:
+                        logs_r = _req.get(
+                            f"{client_urls[key]}/logs?since={log_offsets[key]}", timeout=3
+                        ).json()
+                        for line in logs_r.get("lines", []):
+                            self._emit(key, line)
+                        log_offsets[key] = logs_r.get("total", log_offsets[key])
+                    except Exception:
+                        pass
 
-                client_states: dict = {}
-                client_losses: list = []
-
-                with ThreadPoolExecutor(max_workers=clients) as pool:
-                    futures = {pool.submit(train_client, i): i for i in range(1, clients + 1)}
-                    for fut in as_completed(futures):
-                        if self._stop_event.is_set():
-                            stopped_early = True
-                            break
-                        try:
-                            ci, cs, cl = fut.result()
-                            client_states[ci] = cs
-                            client_losses.append(cl)
-                            self._emit("server", f"[R{rnd}] W de client-{ci} recebido (loss={cl:.5f})")
-                        except Exception as exc:
-                            self._emit("server", f"[R{rnd}] erro em cliente: {exc}")
-
-                if stopped_early or not client_states:
-                    if not stopped_early:
-                        self._emit("server", f"[R{rnd}] sem pesos retornados -- abortando")
+                if state in ("done", "error", "stopped"):
+                    if state == "error":
+                        self._emit("server", f"[error] fl-server reported an error: {st.get('error')}")
                     break
 
-                self._emit("server", f"[R{rnd}] FedAvg: media de {len(client_states)} modelos...")
-                avg_state = {}
-                for key in next(iter(client_states.values())).keys():
-                    avg_state[key] = torch.stack(
-                        [client_states[i][key].float() for i in sorted(client_states)]
-                    ).mean(dim=0)
-                global_model.load_state_dict(avg_state)
-                global_loss = sum(client_losses) / len(client_losses)
-                self._emit("server", f"[R{rnd}] W_global atualizado | global_loss={global_loss:.5f}")
-                history.append({
-                    "epoch": rnd,
-                    "loss": round(global_loss, 6),
-                    "accuracy": round(max(0.01, min(0.99, 1.0 - global_loss)), 4),
-                })
+                time.sleep(1.5)
 
-            if not stopped_early and client_states:
-                torch.save(global_model.state_dict(), weights_path)
-                self._emit("server", f"[done] FedAvg finalizado | loss_final={global_loss:.5f}")
-                self._emit("server", f"[done] Pesos -> {weights_path}")
-                self._emit("server", "[done] Use /semantic e /benchmark para avaliar os pesos treinados")
-            elif stopped_early:
-                self._emit("server", "[stopped] Pesos NAO salvos (treino interrompido)")
+            if self._stop_event.is_set():
+                try:
+                    _req.post(f"{FL_SERVER}/training/stop", timeout=5)
+                except Exception:
+                    pass
+                self._emit("server", "[stopped] treinamento interrompido pelo usuario")
 
+            self._emit("server", f"[done] FedAvg containers finalizado | loss_final={global_loss:.5f}")
+
+            # ── Persist experiment artifacts ──────────────────────────────
             metrics = {
                 "experiment_id": experiment_id,
-                "dataset":       dataset,
-                "model":         model,
-                "mode":          "real_fedavg",
-                "distribution":  "iid",
-                "clients":       clients,
-                "rounds":        NUM_ROUNDS,
+                "dataset":      dataset,
+                "model":        model,
+                "mode":         "real_fedavg_containers",
+                "distribution": "iid",
+                "clients":      clients,
+                "rounds":       NUM_ROUNDS,
                 "epochs_per_round": epochs,
-                "noise":         noise,
-                "awgn":          {"enabled": awgn_enabled, "snr_db": awgn_snr},
-                "final_loss":    round(global_loss, 6),
+                "noise":        noise,
+                "awgn":         {"enabled": awgn_enabled, "snr_db": awgn_snr},
+                "final_loss":   round(global_loss, 6),
                 "final_accuracy": round(max(0.01, min(0.99, 1.0 - global_loss)), 4),
-                "timestamp":     int(time.time()),
+                "timestamp":    int(time.time()),
             }
-            (RUNS_DIR / "latest_metrics.json").write_text(
-                __import__("json").dumps({**metrics, "history": history}, indent=2), encoding="utf-8"
-            )
+            latest_file = RUNS_DIR / "latest_metrics.json"
+            latest_file.write_text(json.dumps({**metrics, "history": history}, indent=2), encoding="utf-8")
             self._write_json(experiment_dir / "metrics" / "final_summary.json", metrics)
             if history:
                 self._write_csv(experiment_dir / "metrics" / "round_metrics.csv", history)
@@ -623,8 +574,7 @@ class TrainingOrchestrator:
                 self._write_tex_table(experiment_dir / "tables" / "resultados.tex", history)
                 self._save_figures(experiment_dir, history, dataset)
             self._snapshot_logs(experiment_dir, clients)
-            status_msg = "stopped" if stopped_early else "done"
-            self._emit("server", f"[{status_msg}] experimento salvo em {experiment_dir}")
+            self._emit("server", f"[done] experimento salvo em {experiment_dir}")
             for i in range(1, clients + 1):
                 self._emit(f"client-{i}", "[done] loop finalizado")
 
@@ -634,7 +584,6 @@ class TrainingOrchestrator:
             self._real_training = False
             self._stop_event.clear()
             self._pause_event.clear()
-
 
     def _run_training(self, dataset: str, model: str, distribution: str, noise: dict, awgn: dict, clients: int) -> None:
         stopped_early = False

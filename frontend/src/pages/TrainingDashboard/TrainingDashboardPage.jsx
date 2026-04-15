@@ -200,18 +200,18 @@ export default function TrainingDashboardPage() {
           <div className="flex items-center justify-between mb-3">
             <div>
               <p className={`text-sm font-bold ${ realTraining ? "text-orange-400" : "text-slate-300" }`}>
-                {realTraining ? "🔥 Modo Real (PyTorch)" : "🎭 Modo Simulação"}
+                {realTraining ? "🔥 Modo Real — Containers Separados" : "🎭 Modo Simulação"}
               </p>
               <p className="text-[10px] text-slate-500 mt-0.5">
                 {realTraining
-                  ? "Gradientes reais · Pesos salvos em .pth · Uso nas páginas /semantic e /benchmark"
+                  ? "fl-server + fl-client-1/2/3 · FedAvg real · Pesos salvos para /semantic e /benchmark"
                   : "Demo rápida · Curvas FedAvg sintéticas · Não gera pesos de modelo"}
               </p>
             </div>
             <button
               id="mode-toggle-btn"
               type="button"
-              onClick={() => setRealTraining((p) => !p)}
+              onClick={() => { setRealTraining((p) => !p); if (!realTraining && clients > 3) setClients(3); }}
               disabled={isTraining}
               className={`rounded-md px-3 py-1.5 text-xs font-bold uppercase tracking-wider border transition disabled:opacity-40 ${
                 realTraining
@@ -224,25 +224,36 @@ export default function TrainingDashboardPage() {
           </div>
 
           {realTraining && (
-            <div className="mt-2 pt-3 border-t border-orange-900">
-              <div className="flex justify-between items-center mb-1">
+            <div className="mt-2 pt-3 border-t border-orange-900 grid gap-2">
+              {/* Container architecture diagram */}
+              <div className="rounded bg-[#0d0800] border border-orange-900 p-2 text-[10px] font-mono leading-relaxed text-slate-400">
+                <span className="text-orange-300 font-bold">fl-server</span> (agrega FedAvg)
+                <br />
+                {"  ↕  "}
+                <span className="text-yellow-400">volume /fl-weights/</span> (pesos em disco)
+                <br />
+                <span className="text-green-400">fl-client-1</span>
+                {" · "}
+                <span className="text-green-400">fl-client-2</span>
+                {" · "}
+                <span className="text-green-400">fl-client-3</span>
+                <span className="text-slate-600"> (treinam em paralelo)</span>
+              </div>
+
+              <div className="flex justify-between items-center">
                 <span className="text-xs text-slate-400">Épocas por cliente</span>
                 <span className="text-orange-400 font-bold">{epochs}</span>
               </div>
               <input
-                type="range" min="1" max="15" value={epochs}
+                type="range" min="1" max="10" value={epochs}
                 onChange={(e) => setEpochs(Number(e.target.value))}
                 disabled={isTraining}
                 className="w-full accent-orange-400 disabled:opacity-50"
               />
-              <p className="text-[10px] text-slate-500 mt-1">
-                {epochs} época{epochs > 1 ? "s" : ""} × {clients} cliente{clients > 1 ? "s" : ""}
-                {" = ~"}{Math.round(epochs * clients * (dataset === "cifar10" ? 4 : 2))} min (CPU)
+              <p className="text-[10px] text-orange-300/60">
+                ⚠ Modo real usa até 3 clientes (containers pré-alocados).
+                {dataset === "cifar10" ? " CIFAR-10: ~4 min/época/cliente." : " MNIST/Fashion: ~2 min/época/cliente."}
               </p>
-              <div className="mt-2 rounded bg-[#2a1200] border border-orange-900 p-2 text-[10px] text-orange-300">
-                ⚠ O treino real pode demorar alguns minutos por cliente (CPU).
-                Acompanhe os logs no terminal ao lado.
-              </div>
             </div>
           )}
         </div>

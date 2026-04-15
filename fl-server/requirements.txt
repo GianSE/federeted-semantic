@@ -1,0 +1,5 @@
+fastapi==0.115.12
+uvicorn==0.34.0
+torch==2.5.1
+torchvision==0.20.1
+numpy==2.0.2
