@@ -256,7 +256,8 @@ def compute_psnr(
     """
     mse = compute_mse(original, reconstructed)
     if mse == 0:
-        return float("inf")
+        # Avoid Infinity so JSON serialization does not fail.
+        return 120.0
     return float(10 * np.log10(max_val ** 2 / mse))
 
 
