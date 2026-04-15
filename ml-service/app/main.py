@@ -1,14 +1,75 @@
+"""
+main.py
+-------
+FastAPI application entry point for the Federated Semantic Communication
+ML Service.
+
+Endpoints:
+    GET  /health                  Health check
+    POST /training/start          Start federated training (demo simulation)
+    GET  /training/status         Current training state
+    POST /training/pause          Pause training loop
+    POST /training/resume         Resume paused training
+    POST /training/stop           Stop training loop
+    POST /training/logs/clear     Clear log files
+    GET  /training/logs/stream    SSE stream of training logs
+
+    GET  /results/latest          Latest experiment summary
+    GET  /results/experiments     List all experiment summaries
+    GET  /results/experiments/{id} Single experiment detail
+    GET  /results/artifact/{id}/{path} Serve experiment artifacts (images, etc.)
+
+    POST /semantic/process        Encode → quantize → decode a random image
+    POST /semantic/complete       Mask an image and reconstruct it via the model
+    POST /semantic/tradeoff       Monte Carlo SNR × quantization quality sweep
+
+    POST /experiment/benchmark    Cross-dataset benchmark (MSE, PSNR, SSIM,
+                                  compression ratio for all datasets and models)
+
+    GET  /info/architecture       System architecture description (JSON)
+"""
+
+import os
+import time
 from typing import Literal
 
+import torch
+import numpy as np
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app.training.orchestrator import orchestrator
+from app.core.model_utils import get_model, snr_to_noise_std
+from app.core.image_utils import (
+    load_dataset,
+    quantize_latent,
+    dequantize_latent,
+    mask_image_bottom,
+    mask_image_random,
+    mask_image_right,
+    compute_mse,
+    compute_psnr,
+    compute_ssim,
+    compute_compression_ratio,
+    get_original_bytes,
+    get_latent_bytes,
+    DATASET_META,
+)
 
-app = FastAPI(title="semantic-ml-service")
+app = FastAPI(
+    title="Federated Semantic Communication — ML Service",
+    description=(
+        "Research testbed demonstrating that latent representations (VAE / AE) "
+        "reduce data transmission size while preserving semantic information."
+    ),
+    version="2.0.0",
+)
 
+
+# ===========================================================================
+# Request / response schemas
+# ===========================================================================
 
 class AWGNConfig(BaseModel):
     enabled: bool = False
@@ -20,22 +81,114 @@ class TrainRequest(BaseModel):
     model: Literal["ae", "cnn_ae", "cnn_vae"] = "ae"
     distribution: Literal["iid", "non_iid"] = "iid"
     clients: int = 3
-    noise: dict = {
-        "channel": 0,
-        "packet_loss": 0,
-        "latency": 0,
-        "client_drift": 0,
-    }
+    noise: dict = {"channel": 0, "packet_loss": 0, "latency": 0, "client_drift": 0}
     awgn: AWGNConfig = AWGNConfig()
+    # When True, performs actual PyTorch gradient descent instead of simulation.
+    # Logs stream in real time via SSE; weights saved to app/core/<dataset>_<model>.pth
+    real_training: bool = False
+    # Number of local epochs per client round (real training mode only)
+    epochs: int = 5
 
+
+class SemanticCompleteRequest(BaseModel):
+    mask_type: Literal["Metade Inferior", "Pixels Aleatórios", "Metade Direita"] = "Metade Inferior"
+    mask_ratio: float = 0.5
+    model_type: Literal["cnn_ae", "cnn_vae"] = "cnn_vae"
+    dataset: Literal["mnist", "fashion", "cifar10"] = "fashion"
+
+
+class SemanticTradeoffRequest(BaseModel):
+    model_type: Literal["cnn_ae", "cnn_vae"] = "cnn_vae"
+    dataset: Literal["mnist", "fashion", "cifar10"] = "cifar10"
+    num_samples: int = 5
+    snr_levels: list[float] = [20.0, 10.0, 5.0, 0.0]
+    bits_levels: list[int] = [32, 16, 8, 4]
+
+
+class SemanticProcessRequest(BaseModel):
+    model_type: Literal["cnn_ae", "cnn_vae"] = "cnn_vae"
+    dataset: Literal["mnist", "fashion", "cifar10"] = "fashion"
+    bits: int = 8
+
+
+class BenchmarkRequest(BaseModel):
+    """
+    Run a full cross-dataset benchmark.
+
+    Evaluates N random test images per (dataset × model) combination
+    and returns MSE, PSNR, SSIM, compression_ratio, and byte sizes.
+    """
+    datasets: list[Literal["mnist", "fashion", "cifar10"]] = ["mnist", "fashion", "cifar10"]
+    models: list[Literal["cnn_ae", "cnn_vae"]] = ["cnn_vae", "cnn_ae"]
+    bits: int = 8
+    num_samples: int = 20
+    seed: int = 42
+
+
+# ===========================================================================
+# Helpers
+# ===========================================================================
+
+def _format_tensor(tensor: torch.Tensor) -> list:
+    """Convert a tensor to a nested Python list suitable for JSON serialisation."""
+    return tensor.squeeze().cpu().float().numpy().tolist()
+
+
+def _load_model(model_type: str, dataset: str) -> torch.nn.Module:
+    """
+    Instantiate and (if available) load pre-trained weights for a model.
+
+    Args:
+        model_type: "cnn_ae" or "cnn_vae".
+        dataset:    Dataset name (used to determine image channels / size).
+
+    Returns:
+        Model in eval mode.
+    """
+    meta = DATASET_META.get(dataset, DATASET_META["mnist"])
+    channels = meta["channels"]
+    img_size = meta["height"]
+
+    model = get_model(model_type, input_channels=channels, image_size=img_size)
+    weights_path = f"app/core/{dataset}_{model_type}.pth"
+    if os.path.exists(weights_path):
+        model.load_state_dict(
+            torch.load(weights_path, map_location="cpu", weights_only=True)
+        )
+    else:
+        # Weights not yet available — model will produce untrained output.
+        # Run `python -m app.train_local` to generate weights.
+        pass
+    model.eval()
+    return model
+
+
+def _encode(model: torch.nn.Module, model_type: str, x: torch.Tensor) -> torch.Tensor:
+    """Encode an image tensor; returns the mean latent (mu) for VAE."""
+    with torch.no_grad():
+        if model_type == "cnn_vae":
+            mu, _ = model.encode(x)
+            return mu
+        return model.encode(x)
+
+
+# ===========================================================================
+# Health check
+# ===========================================================================
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "ml-service"}
+    """Service liveness probe."""
+    return {"status": "ok", "service": "ml-service", "version": "2.0.0"}
 
+
+# ===========================================================================
+# Training endpoints (delegate to orchestrator)
+# ===========================================================================
 
 @app.post("/training/start")
 def training_start(payload: TrainRequest):
+    """Start the federated training simulation or real PyTorch training."""
     clients = max(1, min(8, payload.clients))
     return orchestrator.start(
         payload.dataset,
@@ -44,11 +197,14 @@ def training_start(payload: TrainRequest):
         payload.noise,
         payload.awgn.model_dump(),
         clients,
+        real_training=payload.real_training,
+        epochs=payload.epochs,
     )
 
 
 @app.get("/training/status")
 def training_status():
+    """Return current training state (running, paused, active_clients)."""
     return orchestrator.status()
 
 
@@ -77,6 +233,7 @@ def training_logs_clear(payload: dict | None = None):
 
 @app.get("/training/logs/stream")
 def training_logs_stream(target: str = "server"):
+    """SSE endpoint: streams log lines for a given target (server or client-N)."""
     def event_gen():
         for message in orchestrator.stream(target):
             yield f"data: {message}\n\n"
@@ -84,18 +241,20 @@ def training_logs_stream(target: str = "server"):
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
+# ===========================================================================
+# Results endpoints (delegate to orchestrator)
+# ===========================================================================
+
 @app.get("/results/latest")
 def results_latest():
     latest = orchestrator.latest_experiment()
     if not latest:
-        fallback = {
+        return {
             "dataset": "-",
             "final_loss": None,
             "final_accuracy": None,
             "history": [],
         }
-        return fallback
-
     return latest
 
 
@@ -119,167 +278,344 @@ def results_artifact(experiment_id: str, artifact_path: str):
         raise HTTPException(status_code=404, detail="Artifact not found")
     return FileResponse(path)
 
-# ================================
-# Módulo: Comunicação Semântica
-# ================================
-import torch
-import numpy as np
-from app.core.model_utils import get_model
-from app.core.image_utils import load_dataset, quantize_latent, dequantize_latent, mask_image_bottom, mask_image_random, mask_image_right, compute_mse, compute_psnr
 
-class SemanticCompleteRequest(BaseModel):
-    mask_type: Literal["Metade Inferior", "Pixels Aleatórios", "Metade Direita"] = "Metade Inferior"
-    mask_ratio: float = 0.5
-    model_type: Literal["cnn_ae", "cnn_vae"] = "cnn_vae"
-    dataset: Literal["mnist", "fashion", "cifar10"] = "fashion"
-
-class SemanticTradeoffRequest(BaseModel):
-    model_type: Literal["cnn_ae", "cnn_vae"] = "cnn_vae"
-    dataset: Literal["mnist", "fashion", "cifar10"] = "cifar10"
-    num_samples: int = 5
-    snr_levels: list[float] = [20.0, 10.0, 5.0, 0.0]
-    bits_levels: list[int] = [32, 16, 8, 4]
-
-class SemanticProcessRequest(BaseModel):
-    model_type: Literal["cnn_ae", "cnn_vae"] = "cnn_vae"
-    dataset: Literal["mnist", "fashion", "cifar10"] = "fashion"
-    bits: int = 8
-
-def format_tensor(tensor):
-    return tensor.squeeze().cpu().float().numpy().tolist()
+# ===========================================================================
+# Semantic communication endpoints
+# ===========================================================================
 
 @app.post("/semantic/process")
 def semantic_process(req: SemanticProcessRequest):
+    """
+    Demonstrate the semantic compression pipeline on a single random image.
+
+    Flow:
+        original image → encode → quantize → dequantize → decode → reconstructed
+
+    Returns MSE, PSNR, SSIM, byte sizes, and the compression ratio.
+    """
     try:
-        import os
-        channels = 3 if req.dataset == "cifar10" else 1
-        img_size = 32 if req.dataset == "cifar10" else 28
-        model = get_model(req.model_type, input_channels=channels, image_size=img_size)
-        weights_path = f"app/core/{req.dataset}_{req.model_type}.pth"
-        if os.path.exists(weights_path):
-            model.load_state_dict(torch.load(weights_path, map_location="cpu", weights_only=True))
-        model.eval()
+        model = _load_model(req.model_type, req.dataset)
         dataset_obj = load_dataset(req.dataset, train=False)
-        idx = torch.randint(0, len(dataset_obj), (1,)).item()
+
+        idx = int(torch.randint(0, len(dataset_obj), (1,)).item())
         original, label = dataset_obj[idx]
-        original = original.unsqueeze(0)
-        
+        original = original.unsqueeze(0)          # [1, C, H, W]
+
         with torch.no_grad():
-            if req.model_type == "cnn_vae":
-                latent, _ = model.encode(original)
-            else:
-                latent = model.encode(original)
-                
+            latent = _encode(model, req.model_type, original)
             q_latent, scale = quantize_latent(latent, bits=req.bits)
             dq_latent = dequantize_latent(q_latent, scale)
             reconstructed = model.decode(dq_latent)
-        
-        bytes_factor = 4 if req.bits >= 32 else (req.bits/8)
-        bytes_scalar = 0 if req.bits >= 32 else 4
-        latent_bytes = int(latent.numel() * bytes_factor + bytes_scalar)
-        
+
+        original_bytes = get_original_bytes(req.dataset)
+        latent_bytes_q  = get_latent_bytes(latent, req.bits)
+        latent_bytes_f32 = get_latent_bytes(latent, 32)
+        ratio = original_bytes / latent_bytes_q if latent_bytes_q > 0 else float("inf")
+
         return {
             "status": "ok",
-            "original": format_tensor(original),
-            "reconstructed": format_tensor(reconstructed),
+            "original": _format_tensor(original),
+            "reconstructed": _format_tensor(reconstructed),
             "label": int(label),
             "mse": compute_mse(original, reconstructed),
             "psnr": compute_psnr(original, reconstructed),
-            "latent_size_float": int(latent.numel() * 4),
-            "latent_size_int8": latent_bytes
+            "ssim": compute_ssim(original, reconstructed),
+            "original_bytes": original_bytes,
+            "latent_size_float": latent_bytes_f32,
+            "latent_size_int8": latent_bytes_q,
+            "compression_ratio": round(ratio, 2),
+            "bandwidth_reduction_pct": round((1 - latent_bytes_q / original_bytes) * 100, 1),
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 
 @app.post("/semantic/complete")
 def semantic_complete(req: SemanticCompleteRequest):
+    """
+    Simulate packet loss / channel corruption via image masking and
+    demonstrate model-based reconstruction.
+
+    Flow:
+        original → mask (drop) → model forward pass → completed image
+
+    Returns MSE, PSNR, and SSIM between original and completed image.
+    """
     try:
-        import os
-        channels = 3 if req.dataset == "cifar10" else 1
-        img_size = 32 if req.dataset == "cifar10" else 28
-        model = get_model(req.model_type, input_channels=channels, image_size=img_size)
-        weights_path = f"app/core/{req.dataset}_{req.model_type}.pth"
-        if os.path.exists(weights_path):
-            model.load_state_dict(torch.load(weights_path, map_location="cpu", weights_only=True))
-        model.eval()
+        model = _load_model(req.model_type, req.dataset)
         dataset_obj = load_dataset(req.dataset, train=False)
-        idx = torch.randint(0, len(dataset_obj), (1,)).item()
+
+        idx = int(torch.randint(0, len(dataset_obj), (1,)).item())
         original, label = dataset_obj[idx]
         original = original.unsqueeze(0)
-        
+
         if req.mask_type == "Metade Inferior":
             masked = mask_image_bottom(original, req.mask_ratio)
         elif req.mask_type == "Pixels Aleatórios":
             masked = mask_image_random(original, req.mask_ratio)
         else:
             masked = mask_image_right(original, req.mask_ratio)
-            
+
         with torch.no_grad():
             output = model(masked)
             completed = output[0] if isinstance(output, tuple) else output
-            
+
         return {
             "status": "ok",
-            "original": format_tensor(original),
-            "masked": format_tensor(masked),
-            "completed": format_tensor(completed),
+            "original": _format_tensor(original),
+            "masked": _format_tensor(masked),
+            "completed": _format_tensor(completed),
+            "label": int(label),
             "mse": compute_mse(original, completed),
-            "psnr": compute_psnr(original, completed)
+            "psnr": compute_psnr(original, completed),
+            "ssim": compute_ssim(original, completed),
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 
 @app.post("/semantic/tradeoff")
 def semantic_tradeoff(req: SemanticTradeoffRequest):
+    """
+    Monte Carlo sweep over SNR × quantisation levels.
+
+    For each (sample, SNR, bits) combination:
+      1. Encode the image to the latent space.
+      2. Add AWGN noise proportional to the SNR level.
+      3. Quantise to the target bit-width.
+      4. Decode and compute PSNR + SSIM.
+
+    Returns a flat list of result objects for client-side charting.
+    """
     try:
-        import os
-        channels = 3 if req.dataset == "cifar10" else 1
-        img_size = 32 if req.dataset == "cifar10" else 28
-        model = get_model(req.model_type, input_channels=channels, image_size=img_size)
-        weights_path = f"app/core/{req.dataset}_{req.model_type}.pth"
-        if os.path.exists(weights_path):
-            model.load_state_dict(torch.load(weights_path, map_location="cpu", weights_only=True))
-        model.eval()
-        
+        model = _load_model(req.model_type, req.dataset)
         dataset_obj = load_dataset(req.dataset, train=False)
         results = []
-        
+
         with torch.no_grad():
             for _ in range(req.num_samples):
-                idx = torch.randint(0, len(dataset_obj), (1,)).item()
+                idx = int(torch.randint(0, len(dataset_obj), (1,)).item())
                 original, label = dataset_obj[idx]
                 original = original.unsqueeze(0)
-                
+
                 for snr in req.snr_levels:
-                    # AWGN on Latent Space
-                    if req.model_type == "cnn_vae":
-                        latent, _ = model.encode(original)
-                    else:
-                        latent = model.encode(original)
-                        
-                    from app.core.model_utils import snr_to_noise_std
+                    latent = _encode(model, req.model_type, original)
                     noise_std = snr_to_noise_std(snr)
                     noisy_latent = latent + torch.randn_like(latent) * noise_std
-                    
+
                     for bits in req.bits_levels:
-                        # Quantization
                         q_latent, scale = quantize_latent(noisy_latent, bits)
                         dq_latent = dequantize_latent(q_latent, scale)
                         recon = model.decode(dq_latent)
-                        
-                        psnr = compute_psnr(original, recon)
-                        bytes_factor = 4 if bits >= 32 else (bits/8)
-                        bytes_scalar = 0 if bits >= 32 else 4
-                        payload = int(latent.numel() * bytes_factor + bytes_scalar)
-                        
+
+                        payload = get_latent_bytes(latent, bits)
+
                         results.append({
                             "snr_db": snr,
                             "bits": bits,
-                            "psnr": psnr,
+                            "psnr": compute_psnr(original, recon),
+                            "ssim": compute_ssim(original, recon),
                             "payload_bytes": payload,
-                            "dataset": req.dataset
+                            "original_bytes": get_original_bytes(req.dataset),
+                            "compression_ratio": round(get_original_bytes(req.dataset) / payload, 2)
+                                if payload > 0 else None,
+                            "dataset": req.dataset,
                         })
-        
+
         return {"status": "ok", "items": results}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ===========================================================================
+# Cross-dataset benchmark endpoint
+# ===========================================================================
+
+@app.post("/experiment/benchmark")
+def experiment_benchmark(req: BenchmarkRequest):
+    """
+    Run a structured cross-dataset benchmark.
+
+    For each (dataset × model) pair, evaluate `num_samples` random test images
+    and return aggregate statistics (mean ± std) for:
+        - MSE, PSNR, SSIM
+        - Compression ratio (original bytes / quantised latent bytes)
+        - Bandwidth reduction percentage
+
+    This endpoint provides the scientific evidence for the research hypothesis:
+    "Latent representations reduce bandwidth while preserving semantic information."
+
+    Uses a fixed seed for reproducibility across runs.
+    """
+    try:
+        torch.manual_seed(req.seed)
+        np.random.seed(req.seed)
+
+        results = []
+
+        for dataset_name in req.datasets:
+            # Load dataset once per dataset (expensive op)
+            try:
+                dataset_obj = load_dataset(dataset_name, train=False)
+            except Exception as exc:
+                # Dataset not downloaded yet — skip gracefully
+                results.append({
+                    "dataset": dataset_name,
+                    "status": "error",
+                    "error": str(exc),
+                })
+                continue
+
+            original_bytes = get_original_bytes(dataset_name)
+
+            for model_type in req.models:
+                try:
+                    model = _load_model(model_type, dataset_name)
+                except Exception as exc:
+                    results.append({
+                        "dataset": dataset_name,
+                        "model": model_type,
+                        "status": "error",
+                        "error": str(exc),
+                    })
+                    continue
+
+                mses, psnrs, ssims, ratios = [], [], [], []
+                weights_loaded = os.path.exists(f"app/core/{dataset_name}_{model_type}.pth")
+
+                with torch.no_grad():
+                    indices = torch.randperm(len(dataset_obj))[: req.num_samples]
+                    for idx in indices:
+                        original, _ = dataset_obj[int(idx)]
+                        original = original.unsqueeze(0)
+
+                        latent = _encode(model, model_type, original)
+                        q_latent, scale = quantize_latent(latent, bits=req.bits)
+                        dq_latent = dequantize_latent(q_latent, scale)
+                        reconstructed = model.decode(dq_latent)
+
+                        latent_bytes = get_latent_bytes(latent, req.bits)
+                        ratio = original_bytes / latent_bytes if latent_bytes > 0 else float("inf")
+
+                        mses.append(compute_mse(original, reconstructed))
+                        psnrs.append(compute_psnr(original, reconstructed))
+                        ssims.append(compute_ssim(original, reconstructed))
+                        ratios.append(ratio)
+
+                results.append({
+                    "dataset": dataset_name,
+                    "model": model_type,
+                    "weights_loaded": weights_loaded,
+                    "bits": req.bits,
+                    "num_samples": req.num_samples,
+                    "latent_dim": 32,
+                    "original_bytes": original_bytes,
+                    "latent_bytes": get_latent_bytes(
+                        torch.zeros(1, 32), req.bits
+                    ),
+                    "mse_mean": float(np.mean(mses)),
+                    "mse_std": float(np.std(mses)),
+                    "psnr_mean": float(np.mean(psnrs)),
+                    "psnr_std": float(np.std(psnrs)),
+                    "ssim_mean": float(np.mean(ssims)),
+                    "ssim_std": float(np.std(ssims)),
+                    "compression_ratio_mean": float(np.mean(ratios)),
+                    "bandwidth_reduction_pct": round(
+                        (1 - 1 / float(np.mean(ratios))) * 100, 1
+                    ) if float(np.mean(ratios)) > 0 else 0.0,
+                    "scalability": {
+                        f"{n}_devices": {
+                            "total_original_kb": round(n * original_bytes / 1024, 2),
+                            "total_latent_kb": round(
+                                n * get_latent_bytes(torch.zeros(1, 32), req.bits) / 1024, 2
+                            ),
+                        }
+                        for n in [1, 5, 10, 50, 100]
+                    },
+                    "status": "ok",
+                })
+
+        return {
+            "status": "ok",
+            "seed": req.seed,
+            "bits": req.bits,
+            "timestamp": int(time.time()),
+            "results": results,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ===========================================================================
+# System architecture info endpoint
+# ===========================================================================
+
+@app.get("/info/architecture")
+def info_architecture():
+    """
+    Return a structured description of the system architecture.
+
+    Useful for the frontend presentation page and academic documentation.
+    """
+    return {
+        "title": "Federated Semantic Communication Testbed",
+        "hypothesis": (
+            "Latent representations produced by a Variational Autoencoder (VAE) "
+            "can significantly reduce data transmission bandwidth while preserving "
+            "sufficient semantic information for accurate reconstruction at the receiver."
+        ),
+        "layers": [
+            {
+                "name": "Frontend",
+                "technology": "React 18 + Vite + Tailwind CSS",
+                "description": "Interactive research dashboard with 5 pages: Training, Results, Semantic Comms, Trade-off Analysis, and Cross-Dataset Benchmark.",
+            },
+            {
+                "name": "Backend (API Gateway)",
+                "technology": "Fastify (Node.js)",
+                "description": "Lightweight API gateway that proxies requests from the browser to the Python ML service. Handles CORS, multipart, and SSE streaming.",
+            },
+            {
+                "name": "ML Service",
+                "technology": "FastAPI + PyTorch 2.x",
+                "description": "Core research engine. Implements VAE/AE training, semantic encoding/decoding, AWGN noise injection, quantization, and all quality metrics.",
+            },
+        ],
+        "models": [
+            {
+                "id": "cnn_vae",
+                "name": "Convolutional Variational Autoencoder (CNN-VAE)",
+                "encoder": "Conv2d(in→32) → MaxPool → Conv2d(32→64) → MaxPool → Flatten → FC(256) → μ,σ (32-dim)",
+                "decoder": "FC(32→256) → Reshape(64×7×7) → ConvTranspose → ConvTranspose → Sigmoid",
+                "latent_dim": 32,
+                "loss": "MSE + β·KL(q(z|x) || p(z))",
+                "note": "Recommended: probabilistic latent space improves robustness under AWGN noise.",
+            },
+            {
+                "id": "cnn_ae",
+                "name": "Convolutional Autoencoder (CNN-AE)",
+                "encoder": "Conv2d(in→32) → MaxPool → Conv2d(32→64) → MaxPool → Flatten → FC(256→32)",
+                "decoder": "FC(32→256) → Reshape(64×7×7) → ConvTranspose → ConvTranspose → Sigmoid",
+                "latent_dim": 32,
+                "loss": "MSE",
+            },
+        ],
+        "datasets": [
+            {"name": "MNIST",         "key": "mnist",   "classes": 10, "channels": 1, "resolution": "28×28", "raw_bytes": 3136,  "train_size": 60000, "test_size": 10000},
+            {"name": "Fashion-MNIST", "key": "fashion", "classes": 10, "channels": 1, "resolution": "28×28", "raw_bytes": 3136,  "train_size": 60000, "test_size": 10000},
+            {"name": "CIFAR-10",      "key": "cifar10", "classes": 10, "channels": 3, "resolution": "32×32", "raw_bytes": 12288, "train_size": 50000, "test_size": 10000},
+        ],
+        "metrics": [
+            {"id": "mse",   "name": "Mean Squared Error (MSE)",             "unit": "—",  "better": "lower", "description": "Pixel-level reconstruction fidelity."},
+            {"id": "psnr",  "name": "Peak Signal-to-Noise Ratio (PSNR)",    "unit": "dB", "better": "higher", "description": "Logarithmic reconstruction quality; >25 dB is generally considered good."},
+            {"id": "ssim",  "name": "Structural Similarity Index (SSIM)",   "unit": "—",  "better": "higher", "description": "Perceptual similarity: accounts for luminance, contrast, and structure. Range [-1, 1]; 1 = identical."},
+            {"id": "cr",    "name": "Compression Ratio",                    "unit": "×",  "better": "higher", "description": "original_bytes / latent_bytes. Higher means fewer bytes transmitted."},
+            {"id": "bwred", "name": "Bandwidth Reduction",                  "unit": "%",  "better": "higher", "description": "(1 − 1/CR) × 100. Percentage of bandwidth saved vs. raw transmission."},
+        ],
+        "training": {
+            "protocol": "Federated Averaging (FedAvg)",
+            "mode": "Demo simulation (UI). Real training via CLI: python -m app.train_local",
+            "rounds": 10,
+            "note": "The training dashboard runs a fast simulation for demonstration. Run train_local.py to produce real .pth weights for the semantic endpoints.",
+        },
+    }

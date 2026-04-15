@@ -5,6 +5,7 @@ import { registerTrainingRoutes } from "./routes/training.routes.js";
 import { registerResultsRoutes } from "./routes/results.routes.js";
 import { registerLogRoutes } from "./routes/logs.routes.js";
 import { registerSemanticRoutes } from "./routes/semantic.routes.js";
+import { registerBenchmarkRoutes } from "./routes/benchmark.routes.js";
 
 const app = Fastify({ logger: true });
 const port = Number(process.env.PORT || 3000);
@@ -24,6 +25,7 @@ await registerTrainingRoutes(app, mlServiceUrl);
 await registerResultsRoutes(app, mlServiceUrl);
 await registerLogRoutes(app, mlServiceUrl);
 await registerSemanticRoutes(app, mlServiceUrl);
+await registerBenchmarkRoutes(app, mlServiceUrl);
 
 app.listen({ port, host: "0.0.0.0" }).catch((err) => {
   app.log.error(err);

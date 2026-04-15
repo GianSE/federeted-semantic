@@ -3,10 +3,12 @@ import TerminalLogWindow from "../../components/TerminalLogWindow";
 
 export default function TrainingDashboardPage() {
   const [dataset, setDataset] = useState("mnist");
-  const [model, setModel] = useState("ae");
+  const [model, setModel] = useState("cnn_vae");
   const [distribution, setDistribution] = useState("iid");
   const [awgn, setAwgn] = useState({ enabled: false, snr_db: 10 });
-  const [clients, setClients] = useState(3);
+  const [clients, setClients] = useState(2);
+  const [epochs, setEpochs] = useState(3);
+  const [realTraining, setRealTraining] = useState(false);
   const [noise, setNoise] = useState({
     channel: 0,
     packet_loss: 0,
@@ -18,6 +20,7 @@ export default function TrainingDashboardPage() {
   const [connected, setConnected] = useState(false);
   const [streamEnabled, setStreamEnabled] = useState(false);
   const [isTraining, setIsTraining] = useState(false);
+  const [isRealMode, setIsRealMode] = useState(false); // reflects server state
   const [isPaused, setIsPaused] = useState(false);
   const [actionPending, setActionPending] = useState(false);
   const [activeTab, setActiveTab] = useState("topology");
@@ -76,6 +79,7 @@ export default function TrainingDashboardPage() {
         if (!status) return;
         setIsTraining(Boolean(status.running));
         setIsPaused(Boolean(status.paused));
+        setIsRealMode(Boolean(status.real_training));
         if (status.running) setStreamEnabled(true);
       })
       .catch(() => {});
@@ -86,14 +90,23 @@ export default function TrainingDashboardPage() {
     const response = await fetch("/api/training/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dataset, model, distribution, clients, noise, awgn }),
+      body: JSON.stringify({
+        dataset,
+        model,
+        distribution,
+        clients,
+        noise,
+        awgn,
+        real_training: realTraining,
+        epochs,
+      }),
     });
 
     if (!response.ok) {
       const text = await response.text();
       setLogsByTarget((prev) => {
         const current = prev.server || [];
-        return { ...prev, server: [...current, `[error] failed to start training: ${text}`] };
+        return { ...prev, server: [...current, `[error] falha ao iniciar: ${text}`] };
       });
       setActionPending(false);
       return;
@@ -109,15 +122,17 @@ export default function TrainingDashboardPage() {
 
     setStreamEnabled(true);
     setIsTraining(true);
+    setIsRealMode(realTraining);
     setIsPaused(false);
 
+    const modeLabel = realTraining ? `REAL (PyTorch) épocas=${epochs}` : "SIMULAÇÃO";
     setLogsByTarget((prev) => {
       const current = prev.server || [];
       return {
         ...prev,
         server: [
           ...current,
-          `[controle] treino iniciado dataset=${dataset} modelo=${model} distribution=${distribution} clients=${clients} awgn=${awgn.enabled ? `on:${awgn.snr_db}dB` : "off"}`,
+          `[controle] treino iniciado | modo=${modeLabel} | dataset=${dataset} | modelo=${model} | clients=${clients}`,
         ],
       };
     });
@@ -172,14 +187,82 @@ export default function TrainingDashboardPage() {
   }
 
   return (
-    <section className="grid gap-6 lg:grid-cols-[380px_1fr]">
-      {/* Esquerda: Agrupamentos e Controles */}
+    <section className="grid gap-6 lg:grid-cols-[400px_1fr]">
+      {/* ── Left: Controls ───────────────────────────────────────────── */}
       <div className="flex flex-col gap-4">
+
+        {/* ── MODE SELECTOR ──────────────────────────────────────────── */}
+        <div className={`rounded-xl border p-4 font-mono ${
+          realTraining
+            ? "border-orange-500 bg-[#1a0e00]"
+            : "border-line bg-panel"
+        }`}>
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <p className={`text-sm font-bold ${ realTraining ? "text-orange-400" : "text-slate-300" }`}>
+                {realTraining ? "🔥 Modo Real (PyTorch)" : "🎭 Modo Simulação"}
+              </p>
+              <p className="text-[10px] text-slate-500 mt-0.5">
+                {realTraining
+                  ? "Gradientes reais · Pesos salvos em .pth · Uso nas páginas /semantic e /benchmark"
+                  : "Demo rápida · Curvas FedAvg sintéticas · Não gera pesos de modelo"}
+              </p>
+            </div>
+            <button
+              id="mode-toggle-btn"
+              type="button"
+              onClick={() => setRealTraining((p) => !p)}
+              disabled={isTraining}
+              className={`rounded-md px-3 py-1.5 text-xs font-bold uppercase tracking-wider border transition disabled:opacity-40 ${
+                realTraining
+                  ? "bg-orange-900 border-orange-500 text-orange-300 hover:bg-orange-800"
+                  : "bg-[#0d1420] border-line text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              {realTraining ? "Real ON" : "Simulação"}
+            </button>
+          </div>
+
+          {realTraining && (
+            <div className="mt-2 pt-3 border-t border-orange-900">
+              <div className="flex justify-between items-center mb-1">
+                <span className="text-xs text-slate-400">Épocas por cliente</span>
+                <span className="text-orange-400 font-bold">{epochs}</span>
+              </div>
+              <input
+                type="range" min="1" max="15" value={epochs}
+                onChange={(e) => setEpochs(Number(e.target.value))}
+                disabled={isTraining}
+                className="w-full accent-orange-400 disabled:opacity-50"
+              />
+              <p className="text-[10px] text-slate-500 mt-1">
+                {epochs} época{epochs > 1 ? "s" : ""} × {clients} cliente{clients > 1 ? "s" : ""}
+                {" = ~"}{Math.round(epochs * clients * (dataset === "cifar10" ? 4 : 2))} min (CPU)
+              </p>
+              <div className="mt-2 rounded bg-[#2a1200] border border-orange-900 p-2 text-[10px] text-orange-300">
+                ⚠ O treino real pode demorar alguns minutos por cliente (CPU).
+                Acompanhe os logs no terminal ao lado.
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── Main config panel ──────────────────────────────────────── */}
         <div className="rounded-xl border border-line bg-panel p-6 font-mono shadow-xl relative overflow-hidden">
-          {/* Luz de fundo */}
           <div className="absolute top-0 right-0 w-32 h-32 bg-neon opacity-5 blur-3xl pointer-events-none"></div>
           
-          <h2 className="text-xl font-bold text-neon mb-6">Controle Federado</h2>
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-xl font-bold text-neon">Controle Federado</h2>
+            {isTraining && (
+              <span className={`text-[10px] font-bold uppercase px-2 py-1 rounded border ${
+                isRealMode
+                  ? "border-orange-500 bg-[#1a0e00] text-orange-400"
+                  : "border-neon bg-[#073529] text-neon"
+              }`}>
+                {isRealMode ? "🔥 Real" : "🎭 Sim"}
+              </span>
+            )}
+          </div>
 
           {/* Abas */}
           <div className="flex mb-6 border-b border-[#121c2e]">
@@ -259,7 +342,7 @@ export default function TrainingDashboardPage() {
           )}
         </div>
 
-        {/* Status de Rede & Action Bar */}
+        {/* ── Status + Action Bar ─────────────────────────────────── */}
         <div className="rounded-xl border border-line bg-panel p-4 flex flex-col justify-between font-mono">
           <div className="flex items-center justify-between text-xs uppercase tracking-wide text-slate-400 mb-4 px-2">
             <span>Link do Log:</span>
@@ -270,10 +353,31 @@ export default function TrainingDashboardPage() {
           </div>
 
           <div className="flex flex-col gap-2">
-            <button onClick={isTraining ? stopTraining : startTraining} disabled={actionPending} className={`w-full rounded-md border px-4 py-3 text-sm font-bold uppercase tracking-wider transition-all duration-200 shadow-lg ${actionPending ? "scale-[0.98] animate-pulse border-warn bg-[#3d3313] text-warn shadow-none" : isTraining ? "border-[#ff7b7b] bg-[#3b1a1a] text-[#ff9a9a] hover:bg-[#522929]" : "border-neon bg-[#073529] text-neon hover:bg-[#0b4a3a]"}`}>
-              {isTraining ? "PARAR TREINAMENTO FEDERADO" : "INICIAR TREINAMENTO FEDERADO"}
+            <button
+              id="start-stop-btn"
+              onClick={isTraining ? stopTraining : startTraining}
+              disabled={actionPending}
+              className={`w-full rounded-md border px-4 py-3 text-sm font-bold uppercase tracking-wider transition-all duration-200 shadow-lg ${
+                actionPending
+                  ? "scale-[0.98] animate-pulse border-warn bg-[#3d3313] text-warn shadow-none"
+                  : isTraining
+                  ? "border-[#ff7b7b] bg-[#3b1a1a] text-[#ff9a9a] hover:bg-[#522929]"
+                  : realTraining
+                  ? "border-orange-500 bg-[#1a0e00] text-orange-300 hover:bg-[#261200]"
+                  : "border-neon bg-[#073529] text-neon hover:bg-[#0b4a3a]"
+              }`}
+            >
+              {isTraining
+                ? "PARAR TREINAMENTO"
+                : realTraining
+                ? "🔥 INICIAR TREINO REAL (PyTorch)"
+                : "▶ INICIAR SIMULAÇÃO FEDAVG"}
             </button>
-            <button onClick={togglePause} disabled={!isTraining || actionPending} className="w-full rounded-md border border-line bg-[#0d1420] px-4 py-2 text-xs font-bold uppercase text-slate-300 disabled:opacity-40 transition-colors hover:bg-[#1a2536]">
+            <button
+              onClick={togglePause}
+              disabled={!isTraining || actionPending}
+              className="w-full rounded-md border border-line bg-[#0d1420] px-4 py-2 text-xs font-bold uppercase text-slate-300 disabled:opacity-40 transition-colors hover:bg-[#1a2536]"
+            >
               {isPaused ? "Retomar Execução" : "Pausar Orquestrador"}
             </button>
           </div>
