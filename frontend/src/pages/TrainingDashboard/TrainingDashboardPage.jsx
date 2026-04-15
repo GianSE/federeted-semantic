@@ -5,6 +5,7 @@ export default function TrainingDashboardPage() {
   const [dataset, setDataset] = useState("mnist");
   const [model, setModel] = useState("cnn_vae");
   const [clients, setClients] = useState(2);
+  const [rounds, setRounds] = useState(5);
   const [epochs, setEpochs] = useState(3);
   const [awgn, setAwgn] = useState({ enabled: false, snr_db: 10 });
   const [logsByTarget, setLogsByTarget] = useState({ server: [] });
@@ -84,6 +85,7 @@ export default function TrainingDashboardPage() {
         dataset,
         model,
         clients,
+        rounds,
         awgn,
         epochs,
       }),
@@ -111,7 +113,7 @@ export default function TrainingDashboardPage() {
     setIsTraining(true);
     setIsPaused(false);
 
-    const modeLabel = `REAL (PyTorch) épocas=${epochs}`;
+    const modeLabel = `REAL (PyTorch) rounds=${rounds} ep/cliente=${epochs}`;
     setLogsByTarget((prev) => {
       const current = prev.server || [];
       return {
@@ -206,6 +208,17 @@ export default function TrainingDashboardPage() {
               </div>
 
               <div className="flex justify-between items-center">
+                <span className="text-xs text-slate-400">Rounds</span>
+                <span className="text-orange-400 font-bold">{rounds}</span>
+              </div>
+              <input
+                type="range" min="1" max="20" value={rounds}
+                onChange={(e) => setRounds(Number(e.target.value))}
+                disabled={isTraining}
+                className="w-full accent-orange-400 disabled:opacity-50"
+              />
+
+              <div className="flex justify-between items-center mt-2">
                 <span className="text-xs text-slate-400">Épocas por cliente</span>
                 <span className="text-orange-400 font-bold">{epochs}</span>
               </div>

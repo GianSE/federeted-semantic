@@ -34,6 +34,7 @@ class TrainingOrchestrator:
         model: str,
         clients: int,
         awgn: dict | None = None,
+        rounds: int = 5,
         epochs: int = 5,
     ) -> dict:
         """Start a real federated training run (containers)."""
@@ -63,7 +64,7 @@ class TrainingOrchestrator:
 
         thread = threading.Thread(
             target=self._run_real_training,
-            args=(dataset, model, clients, epochs, awgn or {}),
+            args=(dataset, model, clients, epochs, awgn or {}, rounds),
             daemon=True,
         )
         thread.start()
@@ -75,6 +76,7 @@ class TrainingOrchestrator:
             "clients": clients,
             "epochs": epochs,
             "awgn": awgn or {"enabled": False, "snr_db": None},
+            "rounds": rounds,
         }
 
     def status(self) -> dict:
@@ -373,7 +375,7 @@ class TrainingOrchestrator:
             return None
         return candidate
 
-    def _run_real_training(self, dataset: str, model: str, clients: int, epochs: int, awgn: dict) -> None:
+    def _run_real_training(self, dataset: str, model: str, clients: int, epochs: int, awgn: dict, rounds: int) -> None:
         """
         Container-based FedAvg: delegates training to dedicated fl-server + fl-client containers.
 
@@ -395,7 +397,7 @@ class TrainingOrchestrator:
         import requests as _req
 
         FL_SERVER = os.environ.get("FL_SERVER_URL", "http://fl-server:8100")
-        NUM_ROUNDS = 5
+        NUM_ROUNDS = max(1, int(rounds))
 
         with self._lock:
             experiment_id, experiment_dir = self._new_experiment_dir()

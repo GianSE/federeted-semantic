@@ -75,6 +75,7 @@ class TrainRequest(BaseModel):
     model: Literal["ae", "cnn_ae", "cnn_vae"] = "ae"
     clients: int = 3
     awgn: AWGNConfig = AWGNConfig()
+    rounds: int = 5
     # Number of local epochs per client round (real training mode only)
     epochs: int = 5
 
@@ -165,11 +166,13 @@ def health():
 def training_start(payload: TrainRequest):
     """Start federated training (real mode)."""
     clients = max(1, min(8, payload.clients))
+    rounds = max(1, min(50, payload.rounds))
     return orchestrator.start(
         payload.dataset,
         payload.model,
         clients,
         payload.awgn.model_dump(),
+        rounds,
         epochs=payload.epochs,
     )
 
