@@ -111,3 +111,4 @@ paper/*.ps
 *.orig
 _da_esse_comando_quando_chegar_de_aparecida.txt
 volumes/
+shared_data/
