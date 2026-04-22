@@ -110,6 +110,9 @@ class TrainRequest(BaseModel):
     rounds: int = 5
     # Number of local epochs per client round (real training mode only)
     epochs: int = 5
+    compression_mode: Literal["baseline", "compressed"] = "baseline"
+    compression_bits: int = 8
+    seed: int = 42
 
 
 class ClassifierTrainRequest(BaseModel):
@@ -171,7 +174,12 @@ def _format_tensor(tensor: torch.Tensor) -> list:
 
 
 def _resolve_weights_path(dataset: str, model_type: str, base_weights: str | None) -> tuple[Path | None, str | None]:
-    weights_dir = Path("/ml-data/weights")
+    # DATA_ROOT is set by docker-compose to /app/data/ml-data
+    # fl-server saves weights to ML_DATA_DIR/weights = /app/data/ml-data/weights
+    # We must use the same path so ml-service can find the trained weights.
+    import os as _os
+    _data_root = Path(_os.environ.get("DATA_ROOT", "/app/data/ml-data"))
+    weights_dir = _data_root / "weights"
     archive_dir = weights_dir / "archive"
     prefix = f"{dataset}_{model_type}"
     latest_path = weights_dir / f"{prefix}.pth"
@@ -293,6 +301,9 @@ def training_start(payload: TrainRequest):
         payload.base_weights,
         rounds,
         epochs=payload.epochs,
+        compression_mode=payload.compression_mode,
+        compression_bits=payload.compression_bits,
+        seed=payload.seed,
     )
 
 
@@ -825,6 +836,208 @@ def experiment_benchmark(req: BenchmarkRequest):
         return response_payload
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+
+# ===========================================================================
+# Classifier quick-train endpoint
+# Trains a lightweight SimpleClassifier inside the container so the benchmark
+# can evaluate semantic preservation via classification accuracy.
+# POST /classifier/train-quick  { "dataset": "mnist", "epochs": 3, "samples": 2000 }
+# GET  /classifier/train-quick/status
+# ===========================================================================
+
+class ClassifierQuickTrainRequest(BaseModel):
+    dataset: Literal["mnist", "fashion", "cifar10", "cifar100"] = "mnist"
+    epochs: int = 3
+    samples: int = 2000   # how many training images to use
+    seed: int = 42
+
+
+_clf_train_status: dict = {"running": False, "done": False, "error": None,
+                            "epoch": 0, "total_epochs": 0, "dataset": None,
+                            "accuracy": None, "saved_to": None}
+_clf_train_lock = __import__("threading").Lock()
+
+
+@app.post("/classifier/train-quick")
+def classifier_train_quick(req: ClassifierQuickTrainRequest):
+    """
+    Train a lightweight image classifier inside the container.
+    Required before /experiment/benchmark can evaluate semantic accuracy.
+    Takes ~2-5 min for 2000 samples / 3 epochs on CPU.
+    """
+    import threading as _threading
+
+    with _clf_train_lock:
+        if _clf_train_status["running"]:
+            return {"status": "already_running", **_clf_train_status}
+        _clf_train_status.update({
+            "running": True, "done": False, "error": None,
+            "epoch": 0, "total_epochs": req.epochs, "dataset": req.dataset,
+            "accuracy": None, "saved_to": None,
+        })
+
+    def _worker():
+        import os as _os
+        import torch as _t
+        import torch.nn as _nn
+        import torch.optim as _optim
+        from torch.utils.data import DataLoader, Subset
+        from app.core.classifier_utils import SimpleClassifier
+        from app.core.image_utils import load_dataset, DATASET_META
+
+        try:
+            _t.manual_seed(req.seed)
+            meta  = DATASET_META[req.dataset]
+            model = SimpleClassifier(
+                input_channels=meta["channels"],
+                image_size=meta["height"],
+                num_classes=meta["classes"],
+            )
+            ds_full = load_dataset(req.dataset, train=True)
+            n = min(req.samples, len(ds_full))
+            indices = list(range(n))
+            ds      = Subset(ds_full, indices)
+            loader  = DataLoader(ds, batch_size=64, shuffle=True, num_workers=0)
+
+            opt      = _optim.Adam(model.parameters(), lr=1e-3)
+            crit     = _nn.CrossEntropyLoss()
+            model.train()
+
+            for ep in range(1, req.epochs + 1):
+                with _clf_train_lock:
+                    _clf_train_status["epoch"] = ep
+                correct = total = 0
+                for imgs, labels in loader:
+                    opt.zero_grad()
+                    out  = model(imgs)
+                    loss = crit(out, labels)
+                    loss.backward()
+                    opt.step()
+                    preds   = out.argmax(dim=1)
+                    correct += (preds == labels).sum().item()
+                    total   += len(labels)
+                acc = correct / total
+
+            # Quick validation on 500 test samples
+            ds_test  = load_dataset(req.dataset, train=False)
+            n_test   = min(500, len(ds_test))
+            ds_t     = Subset(ds_test, list(range(n_test)))
+            ldr_test = DataLoader(ds_t, batch_size=64, shuffle=False, num_workers=0)
+            model.eval()
+            correct = total = 0
+            with _t.no_grad():
+                for imgs, labels in ldr_test:
+                    preds   = model(imgs).argmax(dim=1)
+                    correct += (preds == labels).sum().item()
+                    total   += len(labels)
+            val_acc = correct / total
+
+            # Save weights alongside autoencoder weights
+            data_root  = Path(_os.environ.get("DATA_ROOT", "/app/data/ml-data"))
+            weights_dir = data_root / "weights"
+            weights_dir.mkdir(parents=True, exist_ok=True)
+            save_path = weights_dir / f"{req.dataset}_classifier.pth"
+            _t.save(model.state_dict(), save_path)
+
+            with _clf_train_lock:
+                _clf_train_status.update({
+                    "running": False, "done": True, "error": None,
+                    "accuracy": round(val_acc, 4),
+                    "saved_to": str(save_path),
+                })
+
+        except Exception as exc:
+            with _clf_train_lock:
+                _clf_train_status.update({"running": False, "done": False, "error": str(exc)})
+
+    _threading.Thread(target=_worker, daemon=True).start()
+    return {"status": "started", "dataset": req.dataset,
+            "epochs": req.epochs, "samples": req.samples}
+
+
+@app.get("/classifier/train-quick/status")
+def classifier_train_quick_status():
+    """Return current status of the quick classifier training job."""
+    with _clf_train_lock:
+        return dict(_clf_train_status)
+
+
+# ===========================================================================
+# Data preparation endpoint (download datasets inside the container)
+# ===========================================================================
+
+class DataPrepareRequest(BaseModel):
+    datasets: list[Literal["mnist", "fashion", "cifar10", "cifar100"]] = [
+        "mnist", "fashion", "cifar10", "cifar100"
+    ]
+
+
+_data_prepare_status: dict = {"running": False, "done": [], "errors": [], "current": None}
+_data_prepare_lock = __import__("threading").Lock()
+
+
+@app.post("/data/prepare")
+def data_prepare(req: DataPrepareRequest):
+    """
+    Download requested datasets inside the container (into the shared volume).
+
+    This endpoint replaces the need to have torchvision installed on the host.
+    The notebook calls this endpoint so the containers handle all dataset I/O.
+    """
+    import threading as _threading
+
+    with _data_prepare_lock:
+        if _data_prepare_status["running"]:
+            return {"status": "already_running", **_data_prepare_status}
+        _data_prepare_status.update({
+            "running": True, "done": [], "errors": [], "current": None
+        })
+
+    def _worker(datasets_list: list[str]) -> None:
+        # Use the same path that image_utils.load_dataset() uses
+        # DATA_DIR in image_utils.py is "/ml-data/datasets"
+        from app.core.image_utils import DATA_DIR
+        import torchvision.datasets as _ds
+
+        datasets_dir = Path(DATA_DIR)
+        datasets_dir.mkdir(parents=True, exist_ok=True)
+
+        _cls_map = {
+            "mnist":   _ds.MNIST,
+            "fashion": _ds.FashionMNIST,
+            "cifar10": _ds.CIFAR10,
+            "cifar100": _ds.CIFAR100,
+        }
+
+        for name in datasets_list:
+            with _data_prepare_lock:
+                _data_prepare_status["current"] = name
+            try:
+                cls = _cls_map[name]
+                cls(root=str(datasets_dir), train=True, download=True)
+                cls(root=str(datasets_dir), train=False, download=True)
+                with _data_prepare_lock:
+                    _data_prepare_status["done"].append(name)
+            except Exception as exc:
+                with _data_prepare_lock:
+                    _data_prepare_status["errors"].append({"dataset": name, "error": str(exc)})
+
+        with _data_prepare_lock:
+            _data_prepare_status["running"] = False
+            _data_prepare_status["current"] = None
+
+    t = _threading.Thread(target=_worker, args=(req.datasets,), daemon=True)
+    t.start()
+    return {"status": "started", "datasets": req.datasets}
+
+
+@app.get("/data/prepare/status")
+def data_prepare_status():
+    """Return the current status of the dataset preparation job."""
+    with _data_prepare_lock:
+        return {**_data_prepare_status}
 
 
 # ===========================================================================

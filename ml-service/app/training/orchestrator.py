@@ -38,6 +38,9 @@ class TrainingOrchestrator:
         base_weights: str | None = None,
         rounds: int = 5,
         epochs: int = 5,
+        compression_mode: str = "baseline",
+        compression_bits: int = 8,
+        seed: int = 42,
     ) -> dict:
         """Start a real federated training run (containers)."""
         with self._state_lock:
@@ -46,7 +49,6 @@ class TrainingOrchestrator:
                     "status": "already_running",
                     "dataset": dataset,
                     "model": model,
-                    "distribution": distribution,
                 }
 
             self._running = True
@@ -61,12 +63,23 @@ class TrainingOrchestrator:
                 "status": "already_running",
                 "dataset": dataset,
                 "model": model,
-                "distribution": distribution,
             }
 
         thread = threading.Thread(
             target=self._run_real_training,
-            args=(dataset, model, clients, epochs, awgn or {}, masking or {}, rounds, base_weights),
+            args=(
+                dataset,
+                model,
+                clients,
+                epochs,
+                awgn or {},
+                masking or {},
+                rounds,
+                base_weights,
+                compression_mode,
+                compression_bits,
+                seed,
+            ),
             daemon=True,
         )
         thread.start()
@@ -81,6 +94,9 @@ class TrainingOrchestrator:
             "masking": masking or {"enabled": False, "drop_rate": 0.25, "fill_value": 0.0},
             "rounds": rounds,
             "base_weights": base_weights,
+            "compression_mode": compression_mode,
+            "compression_bits": compression_bits,
+            "seed": seed,
         }
 
     def status(self) -> dict:
@@ -218,7 +234,9 @@ class TrainingOrchestrator:
         # Try to load a pre-trained model and produce a real encode→decode
         # comparison.  Fall back to a clearly labelled notice when weights
         # are not yet available.
-        weights_dir = Path("/ml-data/weights")
+        import os as _os
+        _data_root = Path(_os.environ.get("DATA_ROOT", "/app/data/ml-data"))
+        weights_dir = _data_root / "weights"
         archive_dir = weights_dir / "archive"
         weights_path = weights_dir / f"{dataset}_{model_type}.pth"
         core_path = Path(f"app/core/{dataset}_{model_type}.pth")
@@ -340,13 +358,41 @@ class TrainingOrchestrator:
                     "id": exp_dir.name,
                     "dataset": summary.get("dataset"),
                     "model": summary.get("model"),
-                    "distribution": summary.get("distribution", "iid"),
                     "final_loss": summary.get("final_loss"),
                     "final_accuracy": summary.get("final_accuracy"),
+                    "compression_mode": summary.get("compression_mode", "baseline"),
                     "timestamp": summary.get("timestamp"),
                 }
             )
         return items
+
+    def _latest_classifier_semantic(self, dataset: str) -> dict | None:
+        cls_root = RESULTADOS_ROOT / "classifier"
+        if not cls_root.exists():
+            return None
+        for exp_dir in sorted(cls_root.glob("experimento_*"), reverse=True):
+            summary_file = exp_dir / "metrics" / "final_summary.json"
+            eval_file = exp_dir / "metrics" / "evaluation.json"
+            if not summary_file.exists() or not eval_file.exists():
+                continue
+            summary = json.loads(summary_file.read_text(encoding="utf-8"))
+            if summary.get("dataset") != dataset:
+                continue
+            evaluation = json.loads(eval_file.read_text(encoding="utf-8"))
+            baseline = evaluation.get("baseline", {})
+            acc_orig = baseline.get("accuracy_original")
+            acc_recon = baseline.get("accuracy_reconstructed")
+            if acc_orig is None or acc_recon is None:
+                return None
+            drop = float(acc_orig) - float(acc_recon)
+            return {
+                "source_experiment": exp_dir.name,
+                "accuracy_original": float(acc_orig),
+                "accuracy_reconstructed": float(acc_recon),
+                "semantic_drop": round(drop, 4),
+                "threshold_5pct_ok": bool(drop <= 0.05),
+            }
+        return None
 
     def list_experiments(self) -> list[dict]:
         return self._list_experiments()
@@ -371,13 +417,22 @@ class TrainingOrchestrator:
         for line in lines[1:]:
             cols = line.split(",")
             row = {header[i]: cols[i] for i in range(min(len(header), len(cols)))}
-            history.append(
-                {
-                    "epoch": int(row.get("epoch", 0)),
-                    "loss": float(row.get("loss", 0.0)),
-                    "accuracy": float(row.get("accuracy", 0.0)),
-                }
-            )
+            item = {
+                "epoch": int(row.get("epoch", 0)),
+                "loss": float(row.get("loss", 0.0)),
+                "accuracy": float(row.get("accuracy", 0.0)),
+            }
+            if "bytes_clients" in row:
+                item["bytes_clients"] = int(float(row.get("bytes_clients", 0) or 0))
+            if "bytes_global" in row:
+                item["bytes_global"] = int(float(row.get("bytes_global", 0) or 0))
+            if "bytes_total" in row:
+                item["bytes_total"] = int(float(row.get("bytes_total", 0) or 0))
+            if "compression_mode" in row:
+                item["compression_mode"] = row.get("compression_mode", "baseline")
+            if "compression_bits" in row:
+                item["compression_bits"] = int(float(row.get("compression_bits", 8) or 8))
+            history.append(item)
 
         summary["history"] = history
         summary["awgn"] = summary.get("awgn", {"enabled": False, "snr_db": None})
@@ -401,7 +456,20 @@ class TrainingOrchestrator:
             return None
         return candidate
 
-    def _run_real_training(self, dataset: str, model: str, clients: int, epochs: int, awgn: dict, masking: dict, rounds: int, base_weights: str | None) -> None:
+    def _run_real_training(
+        self,
+        dataset: str,
+        model: str,
+        clients: int,
+        epochs: int,
+        awgn: dict,
+        masking: dict,
+        rounds: int,
+        base_weights: str | None,
+        compression_mode: str,
+        compression_bits: int,
+        seed: int,
+    ) -> None:
         """
         Container-based FedAvg: delegates training to dedicated fl-server + fl-client containers.
 
@@ -449,6 +517,9 @@ class TrainingOrchestrator:
                     "awgn":         {"enabled": awgn_enabled, "snr_db": awgn_snr},
                     "masking":      {"enabled": masking_enabled, "drop_rate": masking_drop_rate, "fill_value": masking_fill_value},
                     "base_weights": base_weights,
+                    "compression_mode": compression_mode,
+                    "compression_bits": compression_bits,
+                    "seed": seed,
                 },
             )
 
@@ -457,6 +528,7 @@ class TrainingOrchestrator:
             self._emit("server", "=================================================")
             self._emit("server", f"[init] dataset={dataset} | model={model} | clients={clients}")
             self._emit("server", f"[init] rounds={NUM_ROUNDS} | epochs/round={epochs}")
+            self._emit("server", f"[init] mode={compression_mode} | bits={compression_bits} | seed={seed}")
             self._emit("server", f"[init] fl-server: {FL_SERVER}")
             self._emit("server", f"[exp] id={experiment_id}")
 
@@ -483,7 +555,10 @@ class TrainingOrchestrator:
                           "epochs": epochs, "rounds": NUM_ROUNDS,
                           "awgn": {"enabled": awgn_enabled, "snr_db": awgn_snr},
                           "masking": {"enabled": masking_enabled, "drop_rate": masking_drop_rate, "fill_value": masking_fill_value},
-                          "base_weights": base_weights},
+                          "base_weights": base_weights,
+                          "compression_mode": compression_mode,
+                          "compression_bits": compression_bits,
+                          "seed": seed},
                     timeout=10,
                 )
                 if not r.ok:
@@ -557,6 +632,11 @@ class TrainingOrchestrator:
 
             self._emit("server", f"[done] FedAvg containers finalizado | loss_final={global_loss:.5f}")
 
+            bytes_clients_total = int(sum(h.get("bytes_clients", 0) for h in history))
+            bytes_global_total = int(sum(h.get("bytes_global", 0) for h in history))
+            bytes_total = int(sum(h.get("bytes_total", 0) for h in history))
+            semantic_summary = self._latest_classifier_semantic(dataset)
+
             # ── Persist experiment artifacts ──────────────────────────────
             metrics = {
                 "experiment_id": experiment_id,
@@ -569,8 +649,15 @@ class TrainingOrchestrator:
                 "awgn":         {"enabled": awgn_enabled, "snr_db": awgn_snr},
                 "masking":      {"enabled": masking_enabled, "drop_rate": masking_drop_rate, "fill_value": masking_fill_value},
                 "base_weights": base_weights,
+                "compression_mode": compression_mode,
+                "compression_bits": compression_bits,
+                "seed": seed,
                 "final_loss":   round(global_loss, 6),
                 "final_accuracy": round(max(0.01, min(0.99, 1.0 - global_loss)), 4),
+                "bytes_clients_total": bytes_clients_total,
+                "bytes_global_total": bytes_global_total,
+                "bytes_total": bytes_total,
+                "semantic_summary": semantic_summary,
                 "timestamp":    int(time.time()),
             }
             latest_file = RUNS_DIR / "latest_metrics.json"

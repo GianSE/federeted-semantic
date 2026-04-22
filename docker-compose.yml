@@ -17,8 +17,8 @@ services:
       - FL_SERVER_URL=http://fl-server:8100
     volumes:
       - ./shared_data:/app/data
-    expose:
-      - "8000"
+    ports:
+      - "8000:8000"
     networks:
       - semantic_net
     healthcheck:

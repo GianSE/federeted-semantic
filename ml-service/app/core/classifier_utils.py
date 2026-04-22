@@ -49,7 +49,9 @@ class SimpleClassifier(nn.Module):
 
 
 def _resolve_classifier_weights(dataset_name: str) -> tuple[Path | None, str | None]:
-    weights_dir = Path("/ml-data/weights")
+    import os as _os
+    _data_root = Path(_os.environ.get("DATA_ROOT", "/app/data/ml-data"))
+    weights_dir = _data_root / "weights"
     latest_path = weights_dir / f"{dataset_name}_classifier.pth"
     core_path = Path(f"app/core/{dataset_name}_classifier.pth")
 

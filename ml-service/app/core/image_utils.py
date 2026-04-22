@@ -58,7 +58,8 @@ DATASET_META = {
     },
 }
 
-DATA_DIR = "/ml-data/datasets"
+import os as _os
+DATA_DIR: str = _os.environ.get("DATASETS_DIR", "/app/data/ml-data/datasets")
 
 
 # ---------------------------------------------------------------------------
