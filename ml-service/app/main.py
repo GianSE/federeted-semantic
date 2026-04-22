@@ -739,9 +739,18 @@ def experiment_benchmark(req: BenchmarkRequest):
                                 cls_samples.append(
                                     {
                                         "label": label,
+                                        "original_img": _format_tensor(original),
+                                        "received_img": _format_tensor(received),
+                                        "reconstructed_img": _format_tensor(reconstructed),
                                         "original": pred_original,
                                         "received": pred_received,
                                         "reconstructed": pred_recon,
+                                        # Convenience flags for notebook visualization
+                                        "orig_ok": pred_original["recognized"],
+                                        "recon_ok": pred_recon["recognized"],
+                                        "semantic_lost": pred_original["recognized"] and not pred_recon["recognized"],
+                                        "psnr": float(psnrs[-1]),
+                                        "ssim": float(ssims[-1]),
                                     }
                                 )
 
