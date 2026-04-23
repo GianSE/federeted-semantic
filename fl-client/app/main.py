@@ -62,9 +62,6 @@ def _load_dataset(dataset: str):
     if dataset == "cifar10":
         transform = T.Compose([T.ToTensor()])
         return torchvision.datasets.CIFAR10(str(DATASETS_DIR), train=True, download=True, transform=transform)
-    if dataset == "cifar100":
-        transform = T.Compose([T.ToTensor()])
-        return torchvision.datasets.CIFAR100(str(DATASETS_DIR), train=True, download=True, transform=transform)
     raise ValueError(f"Unknown dataset: {dataset}")
 
 
@@ -208,6 +205,7 @@ def _background_training_loop() -> None:
         masking_fill_value = float(masking_cfg.get("fill_value", 0.0))
         compression_mode = str(config.get("compression_mode", "baseline"))
         compression_bits = int(config.get("compression_bits", 8))
+        latent_dim = int(config.get("latent_dim", 32))
         seed = int(config.get("seed", 42))
         torch.manual_seed(seed + CLIENT_ID)
 
@@ -237,7 +235,7 @@ def _background_training_loop() -> None:
         img_size = meta["height"]
         pixels_pp = channels * meta["height"] * meta["width"]
 
-        local_model = get_model(model_type, latent_dim=32, input_channels=channels, image_size=img_size)
+        local_model = get_model(model_type, latent_dim=latent_dim, input_channels=channels, image_size=img_size)
         local_model.load_state_dict(_load_transport_state(gpath))
         local_model = local_model.to(device)
 

@@ -41,6 +41,7 @@ class TrainingOrchestrator:
         compression_mode: str = "baseline",
         compression_bits: int = 8,
         seed: int = 42,
+        latent_dim: int = 32,
     ) -> dict:
         """Start a real federated training run (containers)."""
         with self._state_lock:
@@ -79,6 +80,7 @@ class TrainingOrchestrator:
                 compression_mode,
                 compression_bits,
                 seed,
+                latent_dim,
             ),
             daemon=True,
         )
@@ -97,6 +99,7 @@ class TrainingOrchestrator:
             "compression_mode": compression_mode,
             "compression_bits": compression_bits,
             "seed": seed,
+            "latent_dim": latent_dim,
         }
 
     def status(self) -> dict:
@@ -469,6 +472,7 @@ class TrainingOrchestrator:
         compression_mode: str,
         compression_bits: int,
         seed: int,
+        latent_dim: int = 32,
     ) -> None:
         """
         Container-based FedAvg: delegates training to dedicated fl-server + fl-client containers.
@@ -520,6 +524,7 @@ class TrainingOrchestrator:
                     "compression_mode": compression_mode,
                     "compression_bits": compression_bits,
                     "seed": seed,
+                    "latent_dim": latent_dim,
                 },
             )
 
@@ -558,7 +563,8 @@ class TrainingOrchestrator:
                           "base_weights": base_weights,
                           "compression_mode": compression_mode,
                           "compression_bits": compression_bits,
-                          "seed": seed},
+                          "seed": seed,
+                          "latent_dim": latent_dim},
                     timeout=10,
                 )
                 if not r.ok:

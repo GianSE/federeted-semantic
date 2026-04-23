@@ -51,7 +51,6 @@ from pydantic import BaseModel
 
 from app.training.orchestrator import orchestrator
 from app.classifier_orchestrator import classifier_orchestrator
-from app.regenerate_figures import regenerate_figures
 from app.core.config import RESULTADOS_ROOT
 from app.core.model_utils import get_model
 from app.core.classifier_utils import load_classifier, predict_topk, format_topk
@@ -101,8 +100,9 @@ class ClassifierConfig(BaseModel):
 
 
 class TrainRequest(BaseModel):
-    dataset: Literal["mnist", "fashion", "cifar10", "cifar100"] = "mnist"
+    dataset: Literal["mnist", "fashion", "cifar10"] = "mnist"
     model: Literal["ae", "cnn_ae", "cnn_vae"] = "ae"
+    latent_dim: int = 32
     clients: int = 3
     awgn: AWGNConfig = AWGNConfig()
     masking: MaskingConfig = MaskingConfig()
@@ -116,7 +116,8 @@ class TrainRequest(BaseModel):
 
 
 class ClassifierTrainRequest(BaseModel):
-    dataset: Literal["mnist", "fashion", "cifar10", "cifar100"] = "mnist"
+    dataset: Literal["mnist", "fashion", "cifar10"] = "mnist"
+    latent_dim: int = 32
     epochs: int = 5
     batch: int = 128
     lr: float = 1e-3
@@ -133,7 +134,8 @@ class ClassifierTrainRequest(BaseModel):
 
 class SemanticProcessRequest(BaseModel):
     model_type: Literal["cnn_ae", "cnn_vae"] = "cnn_vae"
-    dataset: Literal["mnist", "fashion", "cifar10", "cifar100"] = "fashion"
+    dataset: Literal["mnist", "fashion", "cifar10"] = "fashion"
+    latent_dim: int = 32
     bits: int = 8
     awgn: AWGNConfig = AWGNConfig()
     masking: MaskingConfig = MaskingConfig()
@@ -148,13 +150,13 @@ class BenchmarkRequest(BaseModel):
     Evaluates N random test images per (dataset × model) combination
     and returns MSE, PSNR, SSIM, compression_ratio, and byte sizes.
     """
-    datasets: list[Literal["mnist", "fashion", "cifar10", "cifar100"]] = [
+    datasets: list[Literal["mnist", "fashion", "cifar10"]] = [
         "mnist",
         "fashion",
         "cifar10",
-        "cifar100",
     ]
     models: list[Literal["cnn_ae", "cnn_vae"]] = ["cnn_vae", "cnn_ae"]
+    latent_dim: int = 32
     bits: int = 8
     num_samples: int = 20
     seed: int = 42
@@ -173,7 +175,7 @@ def _format_tensor(tensor: torch.Tensor) -> list:
     return tensor.squeeze().cpu().float().numpy().tolist()
 
 
-def _resolve_weights_path(dataset: str, model_type: str, base_weights: str | None) -> tuple[Path | None, str | None]:
+def _resolve_weights_path(dataset: str, model_type: str, base_weights: str | None, latent_dim: int = 32) -> tuple[Path | None, str | None]:
     # DATA_ROOT is set by docker-compose to /app/data/ml-data
     # fl-server saves weights to ML_DATA_DIR/weights = /app/data/ml-data/weights
     # We must use the same path so ml-service can find the trained weights.
@@ -181,7 +183,7 @@ def _resolve_weights_path(dataset: str, model_type: str, base_weights: str | Non
     _data_root = Path(_os.environ.get("DATA_ROOT", "/app/data/ml-data"))
     weights_dir = _data_root / "weights"
     archive_dir = weights_dir / "archive"
-    prefix = f"{dataset}_{model_type}"
+    prefix = f"{dataset}_{model_type}_d{latent_dim}"
     latest_path = weights_dir / f"{prefix}.pth"
     core_path = Path(f"app/core/{prefix}.pth")
 
@@ -211,7 +213,7 @@ def _resolve_weights_path(dataset: str, model_type: str, base_weights: str | Non
     return None, None
 
 
-def _load_model(model_type: str, dataset: str, base_weights: str | None = None) -> tuple[torch.nn.Module, bool, str | None]:
+def _load_model(model_type: str, dataset: str, base_weights: str | None = None, latent_dim: int = 32) -> tuple[torch.nn.Module, bool, str | None]:
     """
     Instantiate and (if available) load pre-trained weights for a model.
 
@@ -227,8 +229,8 @@ def _load_model(model_type: str, dataset: str, base_weights: str | None = None) 
     channels = meta["channels"]
     img_size = meta["height"]
 
-    model = get_model(model_type, input_channels=channels, image_size=img_size)
-    weights_path, source = _resolve_weights_path(dataset, model_type, base_weights)
+    model = get_model(model_type, latent_dim=latent_dim, input_channels=channels, image_size=img_size)
+    weights_path, source = _resolve_weights_path(dataset, model_type, base_weights, latent_dim)
     if weights_path and weights_path.exists():
         model.load_state_dict(
             torch.load(weights_path, map_location="cpu", weights_only=True)
@@ -517,6 +519,7 @@ def semantic_process(req: SemanticProcessRequest):
             req.model_type,
             req.dataset,
             req.base_weights,
+            req.latent_dim,
         )
         classifier_enabled = bool(req.classifier.enabled)
         classifier, classifier_loaded, classifier_source = load_classifier(req.dataset)
@@ -669,9 +672,9 @@ def experiment_benchmark(req: BenchmarkRequest):
 
             for model_type in req.models:
                 try:
-                    model, weights_loaded, _ = _load_model(model_type, dataset_name, "latest")
+                    model, weights_loaded, _ = _load_model(model_type, dataset_name, "latest", req.latent_dim)
                     if not weights_loaded:
-                        core_path = Path(f"app/core/{dataset_name}_{model_type}.pth")
+                        core_path = Path(f"app/core/{dataset_name}_{model_type}_d{req.latent_dim}.pth")
                         if core_path.exists():
                             model.load_state_dict(
                                 torch.load(core_path, map_location="cpu", weights_only=True)
@@ -760,10 +763,10 @@ def experiment_benchmark(req: BenchmarkRequest):
                     "weights_loaded": weights_loaded,
                     "bits": req.bits,
                     "num_samples": req.num_samples,
-                    "latent_dim": 32,
+                    "latent_dim": req.latent_dim,
                     "original_bytes": original_bytes,
                     "latent_bytes": get_latent_bytes(
-                        torch.zeros(1, 32), req.bits
+                        torch.zeros(1, req.latent_dim), req.bits
                     ),
                     "mse_mean": float(np.mean(mses)),
                     "mse_std": float(np.std(mses)),
@@ -857,7 +860,7 @@ def experiment_benchmark(req: BenchmarkRequest):
 # ===========================================================================
 
 class ClassifierQuickTrainRequest(BaseModel):
-    dataset: Literal["mnist", "fashion", "cifar10", "cifar100"] = "mnist"
+    dataset: Literal["mnist", "fashion", "cifar10"] = "mnist"
     epochs: int = 3
     samples: int = 2000   # how many training images to use
     seed: int = 42
@@ -978,8 +981,8 @@ def classifier_train_quick_status():
 # ===========================================================================
 
 class DataPrepareRequest(BaseModel):
-    datasets: list[Literal["mnist", "fashion", "cifar10", "cifar100"]] = [
-        "mnist", "fashion", "cifar10", "cifar100"
+    datasets: list[Literal["mnist", "fashion", "cifar10"]] = [
+        "mnist", "fashion", "cifar10"
     ]
 
 
@@ -1017,7 +1020,7 @@ def data_prepare(req: DataPrepareRequest):
             "mnist":   _ds.MNIST,
             "fashion": _ds.FashionMNIST,
             "cifar10": _ds.CIFAR10,
-            "cifar100": _ds.CIFAR100,
+
         }
 
         for name in datasets_list:
@@ -1107,7 +1110,7 @@ def info_architecture():
             {"name": "MNIST",         "key": "mnist",   "classes": 10, "channels": 1, "resolution": "28×28", "raw_bytes": 3136,  "train_size": 60000, "test_size": 10000},
             {"name": "Fashion-MNIST", "key": "fashion", "classes": 10, "channels": 1, "resolution": "28×28", "raw_bytes": 3136,  "train_size": 60000, "test_size": 10000},
             {"name": "CIFAR-10",      "key": "cifar10", "classes": 10, "channels": 3, "resolution": "32×32", "raw_bytes": 12288, "train_size": 50000, "test_size": 10000},
-            {"name": "CIFAR-100",     "key": "cifar100", "classes": 100, "channels": 3, "resolution": "32×32", "raw_bytes": 12288, "train_size": 50000, "test_size": 10000},
+
         ],
         "metrics": [
             {"id": "mse",   "name": "Mean Squared Error (MSE)",             "unit": "—",  "better": "lower", "description": "Pixel-level reconstruction fidelity."},

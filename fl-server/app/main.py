@@ -161,6 +161,7 @@ class MaskingConfig(BaseModel):
 class StartRequest(BaseModel):
     dataset: str = "fashion"
     model: str = "cnn_vae"
+    latent_dim: int = 32
     clients: int = 2
     epochs: int = 3
     rounds: int = 5
@@ -188,6 +189,7 @@ def _training_thread() -> None:
     config = _session["config"]
     dataset = config["dataset"]
     model_type = config["model"]
+    latent_dim = int(config.get("latent_dim", 32))
     clients = int(config["clients"])
     epochs = int(config["epochs"])
     num_rounds = int(config["rounds"])
@@ -201,9 +203,9 @@ def _training_thread() -> None:
     channels = meta["channels"]
     img_size = meta["height"]
 
-    saved_path = WEIGHTS_DIR / f"{dataset}_{model_type}.pth"
+    saved_path = WEIGHTS_DIR / f"{dataset}_{model_type}_d{latent_dim}.pth"
     base_weights = config.get("base_weights")
-    global_model = get_model(model_type, latent_dim=32, input_channels=channels, image_size=img_size)
+    global_model = get_model(model_type, latent_dim=latent_dim, input_channels=channels, image_size=img_size)
 
     selected_path = None
     if base_weights and base_weights not in ("random", "none"):

@@ -158,7 +158,7 @@ def train_model(
         print(f"  >>> Epoch {epoch+1} complete — avg loss: {avg_loss:.6f}")
 
     # Save weights
-    save_path = f"app/core/{dataset_name}_{model_type}.pth"
+    save_path = f"app/core/{dataset_name}_{model_type}_d{latent_dim}.pth"
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     torch.save(model.state_dict(), save_path)
     print(f"\n  Weights saved → {save_path}\n")
