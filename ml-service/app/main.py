@@ -896,24 +896,51 @@ def classifier_train_quick(req: ClassifierQuickTrainRequest):
         import torch.nn as _nn
         import torch.optim as _optim
         from torch.utils.data import DataLoader, Subset
-        from app.core.classifier_utils import SimpleClassifier
+        from app.core.classifier_utils import SimpleClassifier, MobileNetClassifier
         from app.core.image_utils import load_dataset, DATASET_META
 
         try:
             _t.manual_seed(req.seed)
             meta  = DATASET_META[req.dataset]
-            model = SimpleClassifier(
-                input_channels=meta["channels"],
-                image_size=meta["height"],
-                num_classes=meta["classes"],
-            )
+            
+            if req.dataset == "cifar10":
+                model = MobileNetClassifier(num_classes=meta.get("classes", 10))
+            else:
+                model = SimpleClassifier(
+                    input_channels=meta["channels"],
+                    image_size=meta["height"],
+                    num_classes=meta["classes"],
+                )
+            
             ds_full = load_dataset(req.dataset, train=True)
+            
+            # --- OVERRIDE TRANSFORMS FOR DATA AUGMENTATION (Avoid Overfitting) ---
+            from torchvision import transforms as _tf
+            if req.dataset == "cifar10":
+                # Keras equivalent: Resize(96,96)
+                ds_full.transform = _tf.Compose([
+                    _tf.Resize((96, 96)),
+                    _tf.RandomHorizontalFlip(p=0.5),
+                    _tf.RandomRotation(15),
+                    _tf.ColorJitter(brightness=0.2, contrast=0.2),
+                    _tf.ToTensor()
+                ])
+            elif req.dataset == "fashion":
+                ds_full.transform = _tf.Compose([
+                    _tf.RandomHorizontalFlip(p=0.5),
+                    _tf.RandomRotation(10),
+                    _tf.ToTensor()
+                ])
+            # ---------------------------------------------------------------------
+
             n = min(req.samples, len(ds_full))
             indices = list(range(n))
             ds      = Subset(ds_full, indices)
             loader  = DataLoader(ds, batch_size=64, shuffle=True, num_workers=0)
 
-            opt      = _optim.Adam(model.parameters(), lr=1e-3)
+            # MobileNet Fine-tuning requires ultra low learning rate
+            learning_rate = 1e-5 if req.dataset == "cifar10" else 1e-3
+            opt      = _optim.Adam(model.parameters(), lr=learning_rate)
             crit     = _nn.CrossEntropyLoss()
             model.train()
 
@@ -934,6 +961,9 @@ def classifier_train_quick(req: ClassifierQuickTrainRequest):
 
             # Quick validation on 500 test samples
             ds_test  = load_dataset(req.dataset, train=False)
+            if req.dataset == "cifar10":
+                ds_test.transform = _tf.Compose([_tf.Resize((96, 96)), _tf.ToTensor()])
+            
             n_test   = min(500, len(ds_test))
             ds_t     = Subset(ds_test, list(range(n_test)))
             ldr_test = DataLoader(ds_t, batch_size=64, shuffle=False, num_workers=0)
