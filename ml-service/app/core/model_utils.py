@@ -18,21 +18,40 @@ def snr_to_noise_std(snr_db: float | None) -> float:
 
 def build_simple_backbone(input_channels, output_channels, image_size):
     encoder = nn.Sequential(
+        # Block 1: input_channels → 32
         nn.Conv2d(input_channels, 32, kernel_size=3, padding=1),
-        nn.ReLU(),
-        nn.MaxPool2d(2, 2),
+        nn.BatchNorm2d(32),
+        nn.LeakyReLU(0.2, inplace=True),
+        nn.MaxPool2d(2, 2),  # H/2
+
+        # Block 2: 32 → 64
         nn.Conv2d(32, 64, kernel_size=3, padding=1),
-        nn.ReLU(),
-        nn.MaxPool2d(2, 2),
+        nn.BatchNorm2d(64),
+        nn.LeakyReLU(0.2, inplace=True),
+        nn.MaxPool2d(2, 2),  # H/4
+
+        # Block 3: 64 → 128
+        nn.Conv2d(64, 128, kernel_size=3, padding=1),
+        nn.BatchNorm2d(128),
+        nn.LeakyReLU(0.2, inplace=True),
+        # No pool here — keep spatial res for richer features
     )
     decoder = nn.Sequential(
+        # Mirror block 3
+        nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
+        nn.BatchNorm2d(64),
+        nn.ReLU(inplace=True),
+        # Mirror block 2
         nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),
-        nn.ReLU(),
-        nn.ConvTranspose2d(32, output_channels, kernel_size=3, stride=2, padding=1, output_padding=1),
+        nn.BatchNorm2d(32),
+        nn.ReLU(inplace=True),
+        # Output projection
+        nn.Conv2d(32, output_channels, kernel_size=3, padding=1),
         nn.Sigmoid(),
     )
-    fe_size = image_size // 4
-    return encoder, decoder, 64, fe_size, 256, 64
+    fe_size = image_size // 4  # after 2 MaxPool2d
+    hidden_dim = 512           # bigger bottleneck FC
+    return encoder, decoder, 128, fe_size, hidden_dim, 128
 
 def build_backbone(input_channels, output_channels, image_size):
     return build_simple_backbone(input_channels, output_channels, image_size)

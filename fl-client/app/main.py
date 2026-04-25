@@ -238,33 +238,59 @@ def _background_training_loop() -> None:
         local_model.load_state_dict(_load_transport_state(gpath))
         local_model = local_model.to(device)
 
-        loader = DataLoader(shard, batch_size=128, shuffle=True, num_workers=0)
-        optimizer = optim.Adam(local_model.parameters(), lr=1e-3)
-        criterion = nn.MSELoss()
-        kl_weight = 0.005
+        loader = DataLoader(shard, batch_size=64, shuffle=True, num_workers=0)
+        optimizer = optim.Adam(local_model.parameters(), lr=5e-4, weight_decay=1e-5)
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.7)
+        kl_weight = 0.001
+        ssim_weight = 0.3  # perceptual SSIM loss weight
         local_model.train()
+
+        def ssim_loss(x, y):
+            """Simple SSIM-based loss (1 - SSIM so lower = better)."""
+            C1 = 0.01 ** 2
+            C2 = 0.03 ** 2
+            mu_x = torch.nn.functional.avg_pool2d(x, 3, 1, 1)
+            mu_y = torch.nn.functional.avg_pool2d(y, 3, 1, 1)
+            sigma_x = torch.nn.functional.avg_pool2d(x * x, 3, 1, 1) - mu_x * mu_x
+            sigma_y = torch.nn.functional.avg_pool2d(y * y, 3, 1, 1) - mu_y * mu_y
+            sigma_xy = torch.nn.functional.avg_pool2d(x * y, 3, 1, 1) - mu_x * mu_y
+            ssim_map = ((2 * mu_x * mu_y + C1) * (2 * sigma_xy + C2)) / \
+                       ((mu_x ** 2 + mu_y ** 2 + C1) * (sigma_x + sigma_y + C2))
+            return 1.0 - ssim_map.mean()
 
         last_avg = 0.0
         for ep in range(epochs):
             run = cnt = 0
             for bi, (data, _) in enumerate(loader):
                 data = data.to(device)
-                corrupted = data
-                if masking_enabled:
-                    corrupted = apply_random_pixel_mask(corrupted, masking_drop_rate, masking_fill_value)
-                if awgn_enabled:
-                    corrupted = apply_awgn_noise(corrupted, awgn_snr)
                 optimizer.zero_grad()
+                
+                # Passamos o SNR para o forward do modelo (o modelo aplica o ruído internamente no latent)
+                current_snr = awgn_snr if awgn_enabled else None
+                
                 if model_type == "cnn_vae":
-                    recon, mu, logvar = local_model(corrupted)
-                    rloss = criterion(recon, data)
+                    # No caso do VAE, o forward retorna (recon, mu, logvar)
+                    recon, mu, logvar = local_model(data, snr_db=current_snr)
+                    
+                    # Se masking estiver habilitado, aplicamos no mu (latente principal) antes de decodificar? 
+                    # Na verdade, o ideal é que o modelo já receba o ruído no forward.
+                    
+                    mse = torch.nn.functional.mse_loss(recon, data)
+                    s_loss = ssim_loss(recon, data)
+                    rloss = (1 - ssim_weight) * mse + ssim_weight * s_loss
+                    
                     kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
                     kld /= data.size(0) * pixels_pp
                     loss = rloss + kl_weight * kld
                 else:
-                    recon = local_model(corrupted)
-                    loss = criterion(recon, data)
+                    # No caso do AE, o forward retorna apenas recon
+                    recon = local_model(data, snr_db=current_snr)
+                    
+                    mse = torch.nn.functional.mse_loss(recon, data)
+                    s_loss = ssim_loss(recon, data)
+                    loss = (1 - ssim_weight) * mse + ssim_weight * s_loss
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(local_model.parameters(), 1.0)
                 optimizer.step()
                 run += loss.item()
                 cnt += 1
@@ -272,6 +298,7 @@ def _background_training_loop() -> None:
                     _emit(f"[round {rnd} ep {ep+1}/{epochs}] batch {bi}/{len(loader)} loss={loss.item():.5f}")
             last_avg = run / max(cnt, 1)
             _emit(f"[round {rnd} ep {ep+1}/{epochs}] avg_loss={last_avg:.5f}")
+            scheduler.step()
 
         cpath = _client_weights_path(rnd)
         bytes_tx = _save_transport_state(local_model.state_dict(), cpath, compression_mode, compression_bits)
