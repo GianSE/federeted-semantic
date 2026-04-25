@@ -4,38 +4,17 @@ main.py
 FastAPI application entry point for the Federated Semantic Communication
 ML Service.
 
-Endpoints:
-    GET  /health                  Health check
-    POST /training/start          Start federated training (real mode)
-    GET  /training/status         Current training state
-    POST /training/pause          Pause training loop
-    POST /training/resume         Resume paused training
-    POST /training/stop           Stop training loop
-    POST /training/logs/clear     Clear log files
-    GET  /training/logs/stream    SSE stream of training logs
-
-    POST /classifier/train        Train dataset classifier
-    GET  /classifier/status       Classifier training state
-    POST /classifier/stop         Stop classifier training
-    POST /classifier/logs/clear   Clear classifier logs
-    GET  /classifier/logs/stream  SSE stream of classifier logs
-
-    GET  /classifier/results/latest
-    GET  /classifier/results/experiments
-    GET  /classifier/results/experiments/{id}
-    GET  /classifier/results/artifact/{id}/{path}
-
-    GET  /results/latest          Latest experiment summary
-    GET  /results/experiments     List all experiment summaries
-    GET  /results/experiments/{id} Single experiment detail
-    GET  /results/artifact/{id}/{path} Serve experiment artifacts (images, etc.)
-
-    POST /semantic/process        Encode → quantize → decode a random image
-
-    POST /experiment/benchmark    Cross-dataset benchmark (MSE, PSNR, SSIM,
-                                  compression ratio for all datasets and models)
-
-    GET  /info/architecture       System architecture description (JSON)
+Endpoints (active — used by experimento_federado.ipynb):
+    GET  /health                        Health check
+    POST /data/prepare                  Download datasets inside the container
+    GET  /data/prepare/status           Dataset download progress
+    POST /training/start                Start federated training (FedAvg)
+    GET  /training/status               Current training state + round history
+    GET  /training/logs                 Training log lines (polling)
+    POST /classifier/train-quick        Train lightweight image classifier
+    GET  /classifier/train-quick/status Classifier training progress
+    POST /semantic/process              Encode → channel → decode a random image
+    POST /experiment/benchmark          Cross-dataset benchmark (MSE, PSNR, SSIM)
 """
 
 import json
@@ -46,11 +25,9 @@ from typing import Literal
 import torch
 import numpy as np
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app.training.orchestrator import orchestrator
-from app.classifier_orchestrator import classifier_orchestrator
 from app.core.config import RESULTADOS_ROOT
 from app.core.model_utils import get_model
 from app.core.classifier_utils import load_classifier, predict_topk, format_topk
@@ -312,139 +289,11 @@ def training_start(payload: TrainRequest):
 
 @app.get("/training/status")
 def training_status():
-    """Return current training state (running, paused, active_clients)."""
+    """Return current training state and round history."""
     return orchestrator.status()
 
 
-@app.post("/training/pause")
-def training_pause():
-    return orchestrator.pause()
 
-
-@app.post("/training/resume")
-def training_resume():
-    return orchestrator.resume()
-
-
-@app.post("/training/stop")
-def training_stop():
-    return orchestrator.stop()
-
-
-@app.post("/training/logs/clear")
-def training_logs_clear(payload: dict | None = None):
-    payload = payload or {}
-    raw_clients = payload.get("clients")
-    clients = int(raw_clients) if raw_clients is not None else None
-    return orchestrator.clear_logs(clients)
-
-
-# ==========================================================================
-# Classifier training endpoints
-# ==========================================================================
-
-@app.post("/classifier/train")
-def classifier_train(payload: ClassifierTrainRequest):
-    return classifier_orchestrator.start(payload.model_dump())
-
-
-@app.get("/classifier/status")
-def classifier_status():
-    return classifier_orchestrator.status()
-
-
-@app.post("/classifier/stop")
-def classifier_stop():
-    return classifier_orchestrator.stop()
-
-
-@app.post("/classifier/logs/clear")
-def classifier_logs_clear():
-    return classifier_orchestrator.clear_logs()
-
-
-@app.get("/classifier/logs/stream")
-def classifier_logs_stream():
-    def event_gen():
-        for message in classifier_orchestrator.stream():
-            yield f"data: {message}\n\n"
-
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
-
-
-# ==========================================================================
-# Weights discovery
-# ==========================================================================
-
-@app.get("/weights/list")
-def weights_list(dataset: str, model: str):
-    weights_dir = Path("/ml-data/weights")
-    archive_dir = weights_dir / "archive"
-    items: list[dict] = []
-
-    prefix = f"{dataset}_{model}"
-    latest_path = weights_dir / f"{prefix}.pth"
-    if latest_path.exists():
-        items.append({
-            "key": "latest",
-            "label": f"latest ({latest_path.name})",
-            "filename": latest_path.name,
-            "mtime": latest_path.stat().st_mtime,
-        })
-
-    if archive_dir.exists():
-        for path in sorted(archive_dir.glob(f"{prefix}_*.pth"), key=lambda p: p.stat().st_mtime, reverse=True):
-            items.append({
-                "key": path.name,
-                "label": path.name,
-                "filename": path.name,
-                "mtime": path.stat().st_mtime,
-            })
-
-    return {"items": items}
-
-
-
-
-# ===========================================================================
-# Results endpoints (delegate to orchestrator)
-# ===========================================================================
-
-@app.get("/results/latest")
-def results_latest():
-    latest = orchestrator.latest_experiment()
-    if not latest:
-        return {
-            "dataset": "-",
-            "final_loss": None,
-            "final_accuracy": None,
-            "history": [],
-        }
-    return latest
-
-
-
-
-
-
-
-
-
-
-# ==========================================================================
-# Classifier results endpoints
-# ==========================================================================
-
-@app.get("/classifier/results/latest")
-def classifier_results_latest():
-    latest = classifier_orchestrator.latest_experiment()
-    if not latest:
-        return {
-            "dataset": "-",
-            "final_accuracy": None,
-            "history": [],
-        }
-    return latest
 
 
 
@@ -493,15 +342,16 @@ def semantic_process(req: SemanticProcessRequest):
         masking_drop_rate = float(req.masking.drop_rate) if req.masking.drop_rate is not None else 0.0
         masking_fill_value = float(req.masking.fill_value)
 
-        received = original.clone()
-        if masking_enabled:
-            received = apply_random_pixel_mask(received, masking_drop_rate, masking_fill_value)
-        if awgn_enabled:
-            received = apply_awgn_noise(received, awgn_snr)
-
         with torch.no_grad():
-            latent = _encode(model, req.model_type, received)
-            q_latent, scale = quantize_latent(latent, bits=req.bits)
+            latent = _encode(model, req.model_type, original)
+            
+            noisy_latent = latent.clone()
+            if masking_enabled:
+                noisy_latent = apply_random_pixel_mask(noisy_latent, masking_drop_rate, masking_fill_value, clamp=False)
+            if awgn_enabled:
+                noisy_latent = apply_awgn_noise(noisy_latent, awgn_snr, clamp=False)
+                
+            q_latent, scale = quantize_latent(noisy_latent, bits=req.bits)
             dq_latent = dequantize_latent(q_latent, scale)
 
             reconstructed = model.decode(dq_latent)
@@ -520,9 +370,6 @@ def semantic_process(req: SemanticProcessRequest):
                 classifier_payload["original"] = _classify_sample(
                     classifier, original, label, top_k, min_conf
                 )
-                classifier_payload["received"] = _classify_sample(
-                    classifier, received, label, top_k, min_conf
-                )
                 classifier_payload["reconstructed"] = _classify_sample(
                     classifier, reconstructed, label, top_k, min_conf
                 )
@@ -532,10 +379,6 @@ def semantic_process(req: SemanticProcessRequest):
         latent_bytes_f32 = get_latent_bytes(latent, 32)
         ratio = original_bytes / latent_bytes_q if latent_bytes_q > 0 else float("inf")
 
-        mse_received = compute_mse(original, received)
-        psnr_received = compute_psnr(original, received)
-        ssim_received = compute_ssim(original, received)
-
         mse_recon = compute_mse(original, reconstructed)
         psnr_recon = compute_psnr(original, reconstructed)
         ssim_recon = compute_ssim(original, reconstructed)
@@ -543,7 +386,6 @@ def semantic_process(req: SemanticProcessRequest):
         return {
             "status": "ok",
             "original": _format_tensor(original),
-            "received": _format_tensor(received),
             "reconstructed": _format_tensor(reconstructed),
             "label": int(label),
             "classifier": classifier_payload,
@@ -552,9 +394,6 @@ def semantic_process(req: SemanticProcessRequest):
             "mse": mse_recon,
             "psnr": psnr_recon,
             "ssim": ssim_recon,
-            "mse_received": mse_received,
-            "psnr_received": psnr_received,
-            "ssim_received": ssim_received,
             "awgn": {"enabled": awgn_enabled, "snr_db": awgn_snr},
             "masking": {"enabled": masking_enabled, "drop_rate": masking_drop_rate, "fill_value": masking_fill_value},
             "original_bytes": original_bytes,
@@ -678,14 +517,10 @@ def experiment_benchmark(req: BenchmarkRequest):
                             pred_original = _classify_sample(
                                 classifier, original, label, top_k, min_conf
                             )
-                            pred_received = _classify_sample(
-                                classifier, received, label, top_k, min_conf
-                            )
                             pred_recon = _classify_sample(
                                 classifier, reconstructed, label, top_k, min_conf
                             )
                             cls_hits_original += int(pred_original["recognized"])
-                            cls_hits_received += int(pred_received["recognized"])
                             cls_hits_recon += int(pred_recon["recognized"])
                             cls_hits_both += int(
                                 pred_original["recognized"] and pred_recon["recognized"]
@@ -696,10 +531,8 @@ def experiment_benchmark(req: BenchmarkRequest):
                                     {
                                         "label": label,
                                         "original_img": _format_tensor(original),
-                                        "received_img": _format_tensor(received),
                                         "reconstructed_img": _format_tensor(reconstructed),
                                         "original": pred_original,
-                                        "received": pred_received,
                                         "reconstructed": pred_recon,
                                         # Convenience flags for notebook visualization
                                         "orig_ok": pred_original["recognized"],
@@ -738,9 +571,6 @@ def experiment_benchmark(req: BenchmarkRequest):
                         "top_k": top_k,
                         "min_confidence": min_conf,
                         "accuracy_original": round(cls_hits_original / max(1, req.num_samples), 4)
-                        if classifier_enabled and classifier_loaded
-                        else None,
-                        "accuracy_received": round(cls_hits_received / max(1, req.num_samples), 4)
                         if classifier_enabled and classifier_loaded
                         else None,
                         "accuracy_reconstructed": round(cls_hits_recon / max(1, req.num_samples), 4)
@@ -849,33 +679,26 @@ def classifier_train_quick(req: ClassifierQuickTrainRequest):
         import torch.nn as _nn
         import torch.optim as _optim
         from torch.utils.data import DataLoader, Subset
-        from app.core.classifier_utils import SimpleClassifier, MobileNetClassifier
+        from app.core.classifier_utils import SimpleClassifier
         from app.core.image_utils import load_dataset, DATASET_META
 
         try:
             _t.manual_seed(req.seed)
             meta  = DATASET_META[req.dataset]
             
-            if req.dataset == "cifar10":
-                model = MobileNetClassifier(num_classes=meta.get("classes", 10))
-            else:
-                model = SimpleClassifier(
-                    input_channels=meta["channels"],
-                    image_size=meta["height"],
-                    num_classes=meta["classes"],
-                )
+            model = SimpleClassifier(
+                input_channels=meta["channels"],
+                image_size=meta["height"],
+                num_classes=meta["classes"],
+            )
             
             ds_full = load_dataset(req.dataset, train=True)
             
             # --- OVERRIDE TRANSFORMS FOR DATA AUGMENTATION (Avoid Overfitting) ---
             from torchvision import transforms as _tf
             if req.dataset == "cifar10":
-                # Keras equivalent: Resize(96,96)
                 ds_full.transform = _tf.Compose([
-                    _tf.Resize((96, 96)),
                     _tf.RandomHorizontalFlip(p=0.5),
-                    _tf.RandomRotation(15),
-                    _tf.ColorJitter(brightness=0.2, contrast=0.2),
                     _tf.ToTensor()
                 ])
             elif req.dataset == "fashion":
@@ -891,8 +714,7 @@ def classifier_train_quick(req: ClassifierQuickTrainRequest):
             ds      = Subset(ds_full, indices)
             loader  = DataLoader(ds, batch_size=64, shuffle=True, num_workers=0)
 
-            # MobileNet Fine-tuning requires ultra low learning rate
-            learning_rate = 1e-5 if req.dataset == "cifar10" else 1e-3
+            learning_rate = 1e-3
             opt      = _optim.Adam(model.parameters(), lr=learning_rate)
             crit     = _nn.CrossEntropyLoss()
             model.train()
@@ -914,8 +736,6 @@ def classifier_train_quick(req: ClassifierQuickTrainRequest):
 
             # Quick validation on 500 test samples
             ds_test  = load_dataset(req.dataset, train=False)
-            if req.dataset == "cifar10":
-                ds_test.transform = _tf.Compose([_tf.Resize((96, 96)), _tf.ToTensor()])
             
             n_test   = min(500, len(ds_test))
             ds_t     = Subset(ds_test, list(range(n_test)))
@@ -1035,77 +855,4 @@ def data_prepare_status():
         return {**_data_prepare_status}
 
 
-# ===========================================================================
-# System architecture info endpoint
-# ===========================================================================
 
-@app.get("/info/architecture")
-def info_architecture():
-    """
-    Return a structured description of the system architecture.
-
-    Useful for the frontend presentation page and academic documentation.
-    """
-    return {
-        "title": "Federated Semantic Communication Testbed",
-        "hypothesis": (
-            "Latent representations produced by a Variational Autoencoder (VAE) "
-            "can significantly reduce data transmission bandwidth while preserving "
-            "sufficient semantic information for accurate reconstruction at the receiver."
-        ),
-        "layers": [
-            {
-                "name": "Frontend",
-                "technology": "React 18 + Vite + Tailwind CSS",
-                "description": "Interactive research dashboard with 4 pages: Training, Results, Semantic Comms, and Cross-Dataset Benchmark.",
-            },
-            {
-                "name": "Backend (API Gateway)",
-                "technology": "Fastify (Node.js)",
-                "description": "Lightweight API gateway that proxies requests from the browser to the Python ML service. Handles CORS, multipart, and SSE streaming.",
-            },
-            {
-                "name": "ML Service",
-                "technology": "FastAPI + PyTorch 2.x",
-                "description": "Core research engine. Implements VAE/AE training, semantic encoding/decoding, AWGN noise, quantization, and quality metrics.",
-            },
-        ],
-        "models": [
-            {
-                "id": "cnn_vae",
-                "name": "Convolutional Variational Autoencoder (CNN-VAE)",
-                "encoder": "Conv2d(in→32) → MaxPool → Conv2d(32→64) → MaxPool → Flatten → FC(256) → μ,σ (32-dim)",
-                "decoder": "FC(32→256) → Reshape(64×7×7) → ConvTranspose → ConvTranspose → Sigmoid",
-                "latent_dim": 32,
-                "loss": "MSE + β·KL(q(z|x) || p(z))",
-                "note": "Recommended: probabilistic latent space improves robustness under AWGN noise.",
-            },
-            {
-                "id": "cnn_ae",
-                "name": "Convolutional Autoencoder (CNN-AE)",
-                "encoder": "Conv2d(in→32) → MaxPool → Conv2d(32→64) → MaxPool → Flatten → FC(256→32)",
-                "decoder": "FC(32→256) → Reshape(64×7×7) → ConvTranspose → ConvTranspose → Sigmoid",
-                "latent_dim": 32,
-                "loss": "MSE",
-            },
-        ],
-        "datasets": [
-            {"name": "MNIST",         "key": "mnist",   "classes": 10, "channels": 1, "resolution": "28×28", "raw_bytes": 3136,  "train_size": 60000, "test_size": 10000},
-            {"name": "Fashion-MNIST", "key": "fashion", "classes": 10, "channels": 1, "resolution": "28×28", "raw_bytes": 3136,  "train_size": 60000, "test_size": 10000},
-            {"name": "CIFAR-10",      "key": "cifar10", "classes": 10, "channels": 3, "resolution": "32×32", "raw_bytes": 12288, "train_size": 50000, "test_size": 10000},
-
-        ],
-        "metrics": [
-            {"id": "mse",   "name": "Mean Squared Error (MSE)",             "unit": "—",  "better": "lower", "description": "Pixel-level reconstruction fidelity."},
-            {"id": "psnr",  "name": "Peak Signal-to-Noise Ratio (PSNR)",    "unit": "dB", "better": "higher", "description": "Logarithmic reconstruction quality; >25 dB is generally considered good."},
-            {"id": "ssim",  "name": "Structural Similarity Index (SSIM)",   "unit": "—",  "better": "higher", "description": "Perceptual similarity: accounts for luminance, contrast, and structure. Range [-1, 1]; 1 = identical."},
-            {"id": "cr",    "name": "Compression Ratio",                    "unit": "×",  "better": "higher", "description": "original_bytes / latent_bytes. Higher means fewer bytes transmitted."},
-            {"id": "bwred", "name": "Bandwidth Reduction",                  "unit": "%",  "better": "higher", "description": "(1 − 1/CR) × 100. Percentage of bandwidth saved vs. raw transmission."},
-        ],
-        "training": {
-            "protocol": "Federated Averaging (FedAvg)",
-            "mode": "FedAvg real (containers fl-server + fl-clients)",
-            "rounds": 5,
-            "note": "Use the training dashboard to start real federated training with optional AWGN; weights are saved to /ml-data/weights.",
-        },
-    }

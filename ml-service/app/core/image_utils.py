@@ -189,21 +189,24 @@ def snr_to_noise_std(snr_db: float | None) -> float:
     return 1.0 / math.sqrt(10 ** (snr_db / 10))
 
 
-def apply_awgn_noise(image: torch.Tensor, snr_db: float | None) -> torch.Tensor:
-    """Apply additive white Gaussian noise and clamp the result to [0, 1]."""
+def apply_awgn_noise(image: torch.Tensor, snr_db: float | None, clamp: bool = True) -> torch.Tensor:
+    """Apply additive white Gaussian noise."""
     noise_std = snr_to_noise_std(snr_db)
     if noise_std <= 0:
         return image.clone()
     noisy = image + torch.randn_like(image) * noise_std
-    return noisy.clamp(0.0, 1.0)
+    if clamp:
+        noisy = noisy.clamp(0.0, 1.0)
+    return noisy
 
 
 def apply_random_pixel_mask(
     image: torch.Tensor,
     drop_rate: float | None,
     fill_value: float = 0.0,
+    clamp: bool = True,
 ) -> torch.Tensor:
-    """Randomly remove pixels by replacing them with a constant fill value."""
+    """Randomly remove pixels or latent features by replacing them with a constant fill value."""
     if drop_rate is None or drop_rate <= 0:
         return image.clone()
 
@@ -224,7 +227,10 @@ def apply_random_pixel_mask(
         keep_mask = keep_mask.expand_as(masked)
 
     fill_tensor = torch.full_like(masked, float(fill_value))
-    return torch.where(keep_mask > 0, masked, fill_tensor).clamp(0.0, 1.0)
+    out = torch.where(keep_mask > 0, masked, fill_tensor)
+    if clamp:
+        out = out.clamp(0.0, 1.0)
+    return out
 
 
 # ---------------------------------------------------------------------------

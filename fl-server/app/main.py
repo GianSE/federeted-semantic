@@ -18,7 +18,6 @@ from pathlib import Path
 
 import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 FL_WEIGHTS_DIR = Path(os.environ.get("FL_WEIGHTS_DIR", "/fl-weights"))
@@ -449,17 +448,5 @@ def round_submit(client_id: int, req: SubmitRequest):
 
 @app.get("/logs")
 def get_logs(since: int = 0):
+    """Return accumulated log lines since a given offset (polling-friendly)."""
     return {"lines": _all_logs[since:], "total": len(_all_logs)}
-
-
-@app.get("/logs/stream")
-def logs_stream():
-    def gen():
-        pos = 0
-        while True:
-            while pos < len(_all_logs):
-                yield f"data: {_all_logs[pos]}\n\n"
-                pos += 1
-            time.sleep(0.3)
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
